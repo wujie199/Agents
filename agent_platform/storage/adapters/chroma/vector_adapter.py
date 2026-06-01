@@ -2,6 +2,7 @@ from typing import List, Optional
 import chromadb
 from chromadb.config import Settings
 from core.ports.storage.vector import VectorPort, VectorRecord, SearchResult
+from document.rag.application.retrieval.tag_filter import chroma_safe_metadata
 
 
 def _normalize_where(filter: Optional[dict]) -> Optional[dict]:
@@ -42,7 +43,7 @@ class ChromaVectorAdapter:
         
         ids = [r.id for r in records]
         embeddings = [r.vector for r in records]
-        metadatas = [r.metadata for r in records]
+        metadatas = [chroma_safe_metadata(r.metadata) for r in records]
         documents = [r.content for r in records]
         
         col.upsert(

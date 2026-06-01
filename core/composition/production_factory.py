@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Any, Optional
 from core.domain.context import RequestContext
 from agent_platform.infrastructure.config.adapter import ConfigPortAdapter
 from agent_platform.infrastructure.secret.adapter import SecretPortAdapter
@@ -16,6 +16,101 @@ from agent_platform.storage.adapters.s3.s3_object_store_adapter import S3ObjectS
 from core.composition.run_context import RunContext
 from core.composition.rag_factory_helpers import build_rag_stack
 from agent_platform.storage.adapters.memory.async_cache_adapter import AsyncMemoryCacheAdapter
+from agent_platform.memory.adapters.config_loader import load_memory_config
+from agent_platform.memory.adapters.file_external_memory_adapter import (
+    FileExternalMemoryAdapter,
+)
+from agent_platform.memory.adapters.hot_memory_compressor_adapter import (
+    LlmHotMemoryCompressorAdapter,
+    TruncatingHotMemoryCompressorAdapter,
+)
+from agent_platform.memory.adapters.hot_memory_file_adapter import HotMemoryFileAdapter
+from agent_platform.memory.adapters.llm_summarizer_adapter import (
+    LlmMemorySummarizerAdapter,
+)
+from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapter
+from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
+from agent_platform.memory.adapters.session_vector_factory import build_session_vector_index
+from agent_platform.memory.adapters.archive_factory import build_archive_db
+
+
+def _build_memory_port(
+    config_dir: str,
+    data_dir: str,
+    archive_db: Any,
+    privacy: PrivacyPortAdapter,
+    skills: SimpleSkillAdapter,
+    cache: Any = None,
+    models: Any = None,
+    store_dir_override: Optional[str] = None,
+    session_vector_index: Any = None,
+    session_hybrid_search: bool = True,
+    object_store: Any = None,
+) -> "MemoryPortAdapter":
+    from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
+
+    cfg = load_memory_config(f"{config_dir}/memory.yml")
+    store_dir = store_dir_override or cfg.get("store_dir", f"{data_dir}/memory_dev")
+    hot = HotMemoryFileAdapter(
+        store_dir=store_dir,
+        hot_memory_max_chars=cfg.get("hot_memory_max_chars", 2200),
+        user_memory_max_chars=cfg.get("user_memory_max_chars", 1375),
+    )
+    fallback_summarizer = TruncatingSummarizerAdapter(
+        max_chars=cfg.get("session_search_max_chars", 2000)
+    )
+    summarizer_role = cfg.get("memory_summarizer_role", "memory_summarizer_llm")
+    if cfg.get("use_llm_summarize", True) and models is not None:
+        summarizer = LlmMemorySummarizerAdapter(
+            models=models,
+            role=summarizer_role,
+            max_chars=cfg.get("session_search_max_chars", 2000),
+            fallback=fallback_summarizer,
+        )
+    else:
+        summarizer = fallback_summarizer
+
+    if cfg.get("use_llm_compress", True) and models is not None:
+        compressor = LlmHotMemoryCompressorAdapter(
+            models=models,
+            role=summarizer_role,
+        )
+    else:
+        compressor = TruncatingHotMemoryCompressorAdapter()
+
+    skill_memory = SkillMemoryAdapter(
+        skills=skills,
+        drafts_dir=cfg.get("skills_drafts_dir", "skills/drafts"),
+    )
+    external = FileExternalMemoryAdapter(
+        profiles_dir=cfg.get("external_profiles_dir", "data/external_profiles")
+    )
+    session_vector_index = build_session_vector_index(
+        cfg, data_dir=data_dir, config_dir=config_dir
+    )
+
+    return MemoryPortAdapter(
+        store_dir=store_dir,
+        archive_db=archive_db,
+        hot_memory=hot,
+        privacy=privacy,
+        skill_memory=skill_memory,
+        summarizer=summarizer,
+        compressor=compressor,
+        external_memory=external,
+        cache=cache,
+        models=models,
+        hot_memory_max_chars=cfg.get("hot_memory_max_chars", 2200),
+        user_memory_max_chars=cfg.get("user_memory_max_chars", 1375),
+        session_search_cache_ttl=cfg.get("session_search_cache_ttl", 900),
+        retention_days=cfg.get("retention_days", 90),
+        session_vector_index=session_vector_index,
+        session_hybrid_search=cfg.get("session_hybrid_search", True),
+        object_store=object_store,
+        enable_cold_archive=cfg.get("enable_cold_archive", False),
+        cold_archive_prefix=cfg.get("cold_archive_prefix", "l2/cold"),
+        cold_archive_compress=cfg.get("cold_archive_compress", True),
+    )
 
 
 def build_production_context(
@@ -71,11 +166,8 @@ def build_production_context(
             enable_fallback=True
         )
     
-    relational = AsyncSQLiteRelationalAdapter(
-        db_path=f"{data_dir}/session_archive.db",
-        pool_size=10,
-        timeout=30.0
-    )
+    mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
+    relational = build_archive_db(mem_cfg, data_dir=data_dir)
     
     if use_memory_graph:
         graph = MemoryGraphAdapter()
@@ -119,15 +211,22 @@ def build_production_context(
         sql_port=relational,
         graph_port=graph,
         privacy_port=privacy,
+        data_dir=data_dir,
     )
 
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
     
-    from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
-    memory = MemoryPortAdapter(
-        store_dir=f"{data_dir}/memory",
-        archive_db=relational
+    memory = _build_memory_port(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        archive_db=relational,
+        privacy=privacy,
+        skills=skills,
+        cache=cache,
+        models=models,
+        store_dir_override=f"{data_dir}/memory",
+        object_store=object_store,
     )
     
     return RunContext(
@@ -179,12 +278,9 @@ def build_development_context(
     observability = ObservabilityPortAdapter(service_name="agents-dev")
     
     cache = AsyncMemoryCacheAdapter()
-    
-    relational = AsyncSQLiteRelationalAdapter(
-        db_path=f"{data_dir}/dev_archive.db",
-        pool_size=3,
-        timeout=10.0
-    )
+
+    mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
+    relational = build_archive_db(mem_cfg, data_dir=data_dir, db_name="dev_archive.db")
     
     graph = MemoryGraphAdapter()
     
@@ -208,16 +304,23 @@ def build_development_context(
         sql_port=relational,
         graph_port=graph,
         privacy_port=privacy,
+        data_dir=data_dir,
     )
     rag._enable_cache = False
     
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
     
-    from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
-    memory = MemoryPortAdapter(
-        store_dir=f"{data_dir}/memory_dev",
-        archive_db=relational
+    memory = _build_memory_port(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        archive_db=relational,
+        privacy=privacy,
+        skills=skills,
+        cache=cache,
+        models=models,
+        store_dir_override=f"{data_dir}/memory_dev",
+        object_store=object_store,
     )
     
     return RunContext(

@@ -1,0 +1,35 @@
+# 单库多场景：场景名 → 检索标签（对应建库 metadata.tags）
+# 用法: python document/query_rag.py "问题" --scenario customer_service
+
+default_scenario: null
+
+scenarios:
+  # 客服 / FAQ
+  customer_service:
+    tags: [FAQ, 售后, 租赁]
+    tag_match: any
+
+  # 合同 / 法务
+  legal:
+    tags: [合同, 法律]
+    tag_match: any
+
+  # 财务
+  finance:
+    tags: [财务, 发票]
+    tag_match: any
+
+  # 技术文档
+  technical:
+    tags: [技术文档, API]
+    tag_match: any
+
+  # 人事
+  hr:
+    tags: [人事]
+    tag_match: any
+
+  # 产品营销（需文档打标或规则命中）
+  product:
+    tags: [产品]
+    tag_match: any

@@ -28,6 +28,15 @@ def check_acl(metadata: Dict, acl: Any) -> bool:
     return acl.can_access_doc(doc_id)
 
 
+def filter_evidences_by_acl(evidences: List[Evidence], acl: Any) -> List[Evidence]:
+    if acl is None:
+        return evidences
+    doc_ids = getattr(acl, "doc_ids", None)
+    if doc_ids is not None and len(doc_ids) == 0:
+        return evidences
+    return [ev for ev in evidences if check_acl(ev.metadata or {}, acl)]
+
+
 def search_results_to_evidences(
     results: List[Any],
     source_type: SourceType = SourceType.VECTOR,

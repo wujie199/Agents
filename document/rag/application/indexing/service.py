@@ -93,7 +93,7 @@ class IndexService:
         self._logger.info("Document %s split into %d chunks", doc_id, len(chunks))
 
         embeddings = await self._embedder.embed_chunks(chunks, tenant_id)
-        written = await self._write_vectors(embeddings)
+        bm25_written = False
         if self._bm25_index is not None:
             await asyncio.to_thread(
                 self._bm25_index.index_chunks,
@@ -101,6 +101,17 @@ class IndexService:
                 tenant_id,
                 doc_id,
             )
+            bm25_written = True
+        try:
+            written = await self._write_vectors(embeddings)
+        except Exception:
+            if bm25_written and self._bm25_index is not None:
+                await asyncio.to_thread(
+                    self._bm25_index.delete_by_doc_id,
+                    doc_id,
+                    tenant_id,
+                )
+            raise
         side_indexes = await self._sync_side_indexes(
             doc_id, tenant_id, content, metadata, resolved_profile
         )

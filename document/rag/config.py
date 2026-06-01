@@ -1,4 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import List, Optional
 import yaml
@@ -98,6 +100,20 @@ class RagPipelineConfig:
     ingest: IngestConfig = field(default_factory=IngestConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     rewrite: RewriteConfig = field(default_factory=RewriteConfig)
+
+
+def compute_index_config_hash(cfg: RagPipelineConfig) -> str:
+    """索引相关配置指纹，用于 manifest 跳过/失效判断。"""
+    payload = {
+        "model_version": cfg.model_version,
+        "chunk_size": cfg.chunk_size,
+        "chunk_overlap": cfg.chunk_overlap,
+        "chunk_strategy": cfg.chunk_strategy,
+        "collection_name": cfg.collection_name,
+        "embedding": asdict(cfg.embedding),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def load_rag_pipeline_config(

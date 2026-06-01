@@ -1,10 +1,11 @@
 """在线 RAG 组装：检索、建库门面、embedding/rerank 注入。"""
 
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from core.ports.index import IndexProfile
 
-from document.rag.adapters.registry import build_embedding, build_rerank
+from document.rag.adapters.registry import build_bm25_index, build_embedding, build_rerank
 from document.rag.application.ingest.factory import build_ingest_pipeline
 from document.rag.application.retrieval.rewrite_factory import (
     build_query_rewriter,
@@ -81,6 +82,7 @@ def build_rag_stack(
     sql_port: Optional[Any] = None,
     graph_port: Optional[Any] = None,
     privacy_port: Optional[Any] = None,
+    data_dir: Optional[str] = None,
 ) -> Tuple[Any, Any, Any, Any, RagPipelineConfig]:
     """
     Returns:
@@ -95,6 +97,10 @@ def build_rag_stack(
     index_sql = sql_port if rag_config.retrieval.enable_sql else None
     index_graph = graph_port if rag_config.enable_graph_index else None
 
+    bm25_index = None
+    if data_dir and rag_config.retrieval.enable_bm25_search:
+        bm25_index = build_bm25_index(Path(data_dir), rag_config)
+
     index_port = IndexService(
         vector_port=vector_port,
         embedding_model=embedding,
@@ -102,6 +108,7 @@ def build_rag_stack(
         cache_port=cache_port,
         sql_port=index_sql,
         graph_port=index_graph,
+        bm25_index=bm25_index,
     )
 
     router = None

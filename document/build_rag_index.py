@@ -42,9 +42,10 @@ DEFAULT_SCAN_GLOB = "*.pdf"
 
 from core.ports.index import IndexProfile, IndexResult
 from core.ports.ingest import IngestResult, IngestStatus
-from document.rag.config import RagPipelineConfig
+from document.rag.config import RagPipelineConfig, compute_index_config_hash, load_rag_pipeline_config
 from document.rag.application.cleaning.pipeline import apply_ingest_cleaning
 from document.rag.application.metadata.pipeline import apply_metadata_enrichment
+from document.rag.application.retrieval.tag_filter import merge_tags_into_metadata
 from document.rag.application.ingest.factory import detect_format
 from document.rag.application.indexing.index_manifest import (
     IndexManifest,
@@ -143,16 +144,24 @@ def step4_tag_metadata(
     ingest: IngestResult,
     file_path: Path,
     cfg: RagPipelineConfig,
+    extra_tags: Optional[List[str]] = None,
 ) -> IngestResult:
     """[4/6] 规则/关键词 metadata 打标（tags、categories、matched_rules）。"""
     if ingest.status == IngestStatus.FAILED:
         log.warning("[4/6] metadata  skipped (ingest failed)")
         return ingest
-    if not cfg.metadata.enabled:
+    if cfg.metadata.enabled:
+        doc_format = detect_format(str(file_path))
+        ingest = apply_metadata_enrichment(ingest, doc_format, cfg)
+    elif extra_tags:
+        ingest.metadata = merge_tags_into_metadata(ingest.metadata, extra_tags)
+        log.info("[4/6] metadata  disabled; applied manual tags=%s", extra_tags)
+        return ingest
+    else:
         log.info("[4/6] metadata  disabled")
         return ingest
-    doc_format = detect_format(str(file_path))
-    ingest = apply_metadata_enrichment(ingest, doc_format, cfg)
+    if extra_tags:
+        ingest.metadata = merge_tags_into_metadata(ingest.metadata, extra_tags)
     log.info(
         "[4/6] metadata  tags=%s  rules=%s",
         ingest.metadata.get("tags"),
@@ -218,6 +227,7 @@ async def build_one_document(
     manifest: Optional[IndexManifest] = None,
     skip_indexed: bool = True,
     force_reindex: bool = False,
+    extra_tags: Optional[List[str]] = None,
 ) -> BuildReport:
     """
     单文件离线建库 — 六步顺序执行（本函数即主流程入口）。
@@ -237,7 +247,17 @@ async def build_one_document(
         )
 
     manifest = manifest or IndexManifest.for_data_dir(data_dir)
-    if skip_indexed and not force_reindex and manifest.is_indexed(tenant_id, file_md5):
+    config_hash = compute_index_config_hash(cfg)
+    if (
+        skip_indexed
+        and not force_reindex
+        and manifest.matches_index_config(
+            tenant_id,
+            file_md5,
+            model_version=cfg.model_version,
+            config_hash=config_hash,
+        )
+    ):
         entry = manifest.get_entry(tenant_id, file_md5) or {}
         log.info(
             "=== SKIP %s (MD5 已索引 doc_id=%s indexed_at=%s) ===",
@@ -276,7 +296,7 @@ async def build_one_document(
     ingest = step3_clean_text(ingest, file_path, cfg)
 
     # [4] 元数据打标
-    ingest = step4_tag_metadata(ingest, file_path, cfg)
+    ingest = step4_tag_metadata(ingest, file_path, cfg, extra_tags=extra_tags)
 
     # [5][6] 切块 + 向量入库
     if index_service is None:
@@ -311,6 +331,7 @@ async def build_one_document(
         doc_id=doc_id,
         source_path=str(file_path.resolve()),
         model_version=cfg.model_version,
+        config_hash=config_hash,
         chunk_count=index_result.chunk_count,
         vectors_written=index_result.vectors_written,
     )
@@ -357,6 +378,7 @@ async def run_build(
     index_profile_name: str,
     skip_indexed: bool = True,
     force_reindex: bool = False,
+    extra_tags: Optional[List[str]] = None,
 ) -> int:
     cfg = step1_load_config(config_dir)
     ingest_port = build_offline_ingest_port(cfg)
@@ -393,6 +415,7 @@ async def run_build(
             manifest=manifest,
             skip_indexed=skip_indexed,
             force_reindex=force_reindex,
+            extra_tags=extra_tags,
         )
         if report.skipped:
             skipped += 1
@@ -432,7 +455,7 @@ async def run_rebuild_bm25(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="离线 RAG 建库（五步流程见本文件顶部与 build_one_document）"
+        description="离线 RAG 建库（六步流程见本文件顶部与 build_one_document）"
     )
     parser.add_argument(
         "path",
@@ -472,6 +495,13 @@ def main() -> None:
         help="忽略 MD5 清单，强制重新建库",
     )
     parser.add_argument(
+        "--tag",
+        action="append",
+        default=None,
+        dest="extra_tags",
+        help="建库时附加 metadata 标签（可重复；与规则打标合并）",
+    )
+    parser.add_argument(
         "--rebuild-bm25",
         action="store_true",
         help="从 Chroma 全量重建 BM25 索引（不跑建库）",
@@ -507,6 +537,7 @@ def main() -> None:
                 args.index_profile,
                 skip_indexed=args.skip_indexed,
                 force_reindex=args.force_reindex,
+                extra_tags=args.extra_tags,
             )
         )
     )

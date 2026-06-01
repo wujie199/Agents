@@ -75,11 +75,15 @@ class SimpleSkillAdapter:
                 score += 2
             
             if score > 0:
+                raw = self.get_raw(skill.skill_id) or {}
                 results.append({
                     "skill_id": skill.skill_id,
                     "title": skill.title,
                     "score": score,
-                    "triggers": skill.triggers
+                    "triggers": skill.triggers,
+                    "summary": raw.get("summary", skill.title),
+                    "success_rate": raw.get("success_rate", 1.0),
+                    "last_used_at": raw.get("last_used_at"),
                 })
         
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -177,3 +181,10 @@ class SimpleSkillAdapter:
     def reload(self) -> None:
         self._skills.clear()
         self._load_skills()
+
+    def get_raw(self, skill_id: str) -> Optional[dict]:
+        skill_file = self._skills_dir / skill_id / "skill.yaml"
+        if not skill_file.exists():
+            return None
+        with open(skill_file, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}

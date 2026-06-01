@@ -66,6 +66,14 @@ roles:
       
   rerank:
     profile: dashscope_rerank
+
+  memory_summarizer_llm:
+    profile: dashscope_router
+    resilience:
+      max_retries: 2
+      circuit_breaker:
+        failure_threshold: 3
+        recovery_timeout: 30
     
   ocr:
     provider: paddleocr

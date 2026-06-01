@@ -8,12 +8,33 @@ from typing import Any, List, Optional
 
 from core.domain.context import RequestContext
 from core.domain.evidence import Evidence, EvidenceBundle, SourceType, DegradedReason
-from document.rag.application.retrieval.helpers import search_results_to_evidences
+from document.rag.application.retrieval.helpers import (
+    filter_evidences_by_acl,
+    search_results_to_evidences,
+)
 from document.rag.application.retrieval.rerank_utils import apply_rerank
 from document.rag.application.retrieval.router.fusion import FusionFactory
+from document.rag.application.retrieval.tag_filter import metadata_matches_tags
 from document.rag.config import RagPipelineConfig
 
 _log = logging.getLogger("document.rag.application.retrieval.hybrid_pipeline")
+
+_TAG_FETCH_MULTIPLIER = 4
+
+
+def filter_evidences_by_tags(
+    evidences: List[Evidence],
+    tags: Optional[List[str]],
+    *,
+    tag_match: str = "any",
+) -> List[Evidence]:
+    if not tags:
+        return evidences
+    return [
+        ev
+        for ev in evidences
+        if metadata_matches_tags(ev.metadata, tags, match=tag_match)
+    ]
 
 
 async def vector_search(
@@ -23,6 +44,9 @@ async def vector_search(
     query: str,
     top_k: int,
     tenant_id: str,
+    *,
+    tags: Optional[List[str]] = None,
+    tag_match: str = "any",
 ) -> List[Evidence]:
     if hasattr(embedding_model, "aembed"):
         vectors = await embedding_model.aembed([query])
@@ -31,17 +55,19 @@ async def vector_search(
     else:
         raise RuntimeError("embedding model has no embed/aembed")
     query_vector = vectors[0]
+    fetch_k = top_k * _TAG_FETCH_MULTIPLIER if tags else top_k
     results = await asyncio.to_thread(
         vector_port.similarity_search,
         collection,
         query_vector,
-        top_k,
+        fetch_k,
         {"tenant_id": tenant_id},
     )
     evidences = search_results_to_evidences(results, SourceType.VECTOR)
     for ev in evidences:
         ev.metadata = {**ev.metadata, "retrieval_backend": "vector"}
-    return evidences
+    evidences = filter_evidences_by_tags(evidences, tags, tag_match=tag_match)
+    return evidences[:top_k]
 
 
 def bm25_search(
@@ -49,9 +75,15 @@ def bm25_search(
     query: str,
     top_k: int,
     tenant_id: str,
+    *,
+    tags: Optional[List[str]] = None,
+    tag_match: str = "any",
 ) -> List[Evidence]:
-    raw = bm25_index.search(query, top_k=top_k, tenant_id=tenant_id)
-    return search_results_to_evidences(raw, SourceType.VECTOR)
+    fetch_k = top_k * _TAG_FETCH_MULTIPLIER if tags else top_k
+    raw = bm25_index.search(query, top_k=fetch_k, tenant_id=tenant_id)
+    evidences = search_results_to_evidences(raw, SourceType.VECTOR)
+    evidences = filter_evidences_by_tags(evidences, tags, tag_match=tag_match)
+    return evidences[:top_k]
 
 
 def dedupe_by_chunk_id(evidences: List[Evidence]) -> List[Evidence]:
@@ -97,34 +129,52 @@ async def hybrid_retrieve(
     top_k: Optional[int] = None,
     rerank_n: Optional[int] = None,
     rerank_min_score: Optional[float] = None,
+    tags: Optional[List[str]] = None,
+    tag_match: str = "any",
 ) -> EvidenceBundle:
-    """向量 + BM25 加权融合，再 rerank。"""
+    """向量 + BM25 加权融合，再 rerank。tags 非空时在单库内按 metadata 标签过滤。"""
     ret = config.retrieval
     vector_k = ret.vector_top_k or top_k or config.default_top_k
     bm25_k = ret.bm25_top_k or config.default_top_k
     fusion_n = ret.fusion_top_n or max(vector_k, bm25_k)
     rerank_n = rerank_n or ret.rerank_top_n or config.rerank_top_n
     tenant_id = context.tenant_id
+    acl = context.acl
 
     vector_hits: List[Evidence] = []
     bm25_hits: List[Evidence] = []
 
     if ret.enable_hybrid or ret.enable_vector_search:
         try:
-            vector_hits = await vector_search(
-                vector_port,
-                embedding_model,
-                config.collection_name,
-                query,
-                vector_k,
-                tenant_id,
+            vector_hits = filter_evidences_by_acl(
+                await vector_search(
+                    vector_port,
+                    embedding_model,
+                    config.collection_name,
+                    query,
+                    vector_k,
+                    tenant_id,
+                    tags=tags,
+                    tag_match=tag_match,
+                ),
+                acl,
             )
         except Exception as exc:
             _log.warning("向量检索失败: %s", exc)
 
     if ret.enable_hybrid or ret.enable_bm25_search:
         try:
-            bm25_hits = bm25_search(bm25_index, query, bm25_k, tenant_id)
+            bm25_hits = filter_evidences_by_acl(
+                bm25_search(
+                    bm25_index,
+                    query,
+                    bm25_k,
+                    tenant_id,
+                    tags=tags,
+                    tag_match=tag_match,
+                ),
+                acl,
+            )
         except Exception as exc:
             _log.warning("BM25 检索失败: %s", exc)
 
@@ -168,6 +218,8 @@ async def hybrid_retrieve(
             "fusion_strategy": ret.fusion_strategy,
             "hybrid_weights": ret.hybrid_weights,
             "collection": config.collection_name,
+            "tags": tags or [],
+            "tag_match": tag_match if tags else None,
             "rerank_min_score": min_score if rerank_applied else None,
         },
         empty=len(fused) == 0,

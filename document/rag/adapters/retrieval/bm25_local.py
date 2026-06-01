@@ -244,7 +244,7 @@ class LocalBm25Index:
         ids = batch.get("ids") or []
         documents = batch.get("documents") or []
         metadatas = batch.get("metadatas") or []
-        self._documents = []
+        rebuilt: List[Bm25Document] = []
         for chunk_id, content, meta in zip(ids, documents, metadatas):
             meta = dict(meta or {})
             doc_id = str(meta.get("doc_id") or "")
@@ -252,7 +252,7 @@ class LocalBm25Index:
             text = str(content or "")
             if not chunk_id or not text.strip():
                 continue
-            self._documents.append(
+            rebuilt.append(
                 Bm25Document(
                     doc_id=doc_id,
                     chunk_id=str(chunk_id),
@@ -262,12 +262,24 @@ class LocalBm25Index:
                     tokens=tokenize(text),
                 )
             )
+        if tenant_id:
+            # 仅替换指定租户，保留其他租户的 BM25 条目
+            self._documents = [
+                d for d in self._documents if d.tenant_id != tenant_id
+            ]
+            self._documents.extend(rebuilt)
+            added = len(rebuilt)
+        else:
+            self._documents = rebuilt
+            added = len(rebuilt)
         self._rebuild_model()
         self.save()
         _log.info(
-            "BM25 rebuilt from Chroma collection=%s docs=%d path=%s",
+            "BM25 rebuilt from Chroma collection=%s tenant=%s added=%d total=%d path=%s",
             collection,
+            tenant_id or "*",
+            added,
             len(self._documents),
             self._path,
         )
-        return len(self._documents)
+        return added

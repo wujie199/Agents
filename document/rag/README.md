@@ -62,9 +62,20 @@ python document/build_rag_index.py --rebuild-bm25 --data-dir data/rag_offline
 # 单次查询
 python document/query_rag.py "扫地机器人如何回充"
 
+# 按场景过滤（单库 agent + metadata.tags，见 config/scenarios.yml）
+python document/query_rag.py "退租流程" --scenario customer_service
+
+# 直接指定标签（可与 --scenario 叠加）
+python document/query_rag.py "合同条款" --tag 合同 --tag 法律 --tag-match all
+
+# 建库时附加手动标签（与规则打标合并）
+python document/build_rag_index.py document/rag/pdf --tag 产品 --tag 营销
+
 # 交互 REPL
 python document/query_rag.py
 ```
+
+**单库多场景**：所有文档写入同一 Chroma collection（默认 `agent`），通过 chunk metadata 的 `tags` 区分领域。建库时由 `config/metadata_tagging.yml` 规则打标，也可用 `--tag` 手动追加；检索时用 `--scenario` 或 `--tag` 在召回后过滤（向量/BM25 会过采样再过滤）。
 
 配置见 `config/rag_pipeline.yml` → `retrieval`（`enable_hybrid`、`hybrid_weights`、`fusion_strategy`、`rerank_min_score`）。
 Rerank 后仅保留分数 **大于** `rerank_min_score`（默认 0.8）的结果；关闭过滤可设 `rerank_min_score: null`。

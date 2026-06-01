@@ -1,0 +1,18 @@
+entities:
+  张三:
+    canonical_id: u001
+    display_name: 张三
+  小明:
+    canonical_id: u001
+    display_name: 张三
+
+facts:
+  - key: 部门
+    value: 研发部
+    source: ldap
+  - key: 职位
+    value: 高级工程师
+    source: hr
+  - key: 语言偏好
+    value: 中文
+    source: crm

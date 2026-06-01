@@ -72,6 +72,25 @@ class IndexManifest:
     def is_indexed(self, tenant_id: str, file_md5: str) -> bool:
         return self.get_entry(tenant_id, file_md5) is not None
 
+    def matches_index_config(
+        self,
+        tenant_id: str,
+        file_md5: str,
+        *,
+        model_version: str,
+        config_hash: str,
+    ) -> bool:
+        """文件 MD5 已索引且 model_version / config_hash 与当前配置一致。"""
+        entry = self.get_entry(tenant_id, file_md5)
+        if entry is None:
+            return False
+        if entry.get("model_version") != model_version:
+            return False
+        stored_hash = entry.get("config_hash")
+        if stored_hash is None:
+            return False
+        return stored_hash == config_hash
+
     def register(
         self,
         tenant_id: str,
@@ -80,6 +99,7 @@ class IndexManifest:
         doc_id: str,
         source_path: str,
         model_version: str,
+        config_hash: str,
         chunk_count: int = 0,
         vectors_written: int = 0,
     ) -> None:
@@ -90,6 +110,7 @@ class IndexManifest:
             "source_path": source_path,
             "file_md5": file_md5,
             "model_version": model_version,
+            "config_hash": config_hash,
             "chunk_count": chunk_count,
             "vectors_written": vectors_written,
             "indexed_at": datetime.now(timezone.utc).isoformat(),

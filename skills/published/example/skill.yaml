@@ -1,0 +1,22 @@
+skill_id: example
+version: "1.0.0"
+title: 报告生成示例
+summary: |
+  根据用户意图匹配报告类任务。
+  加载摘要后由 SkillExecutor 按 steps 执行。
+  适用于结构化报告生成场景。
+triggers:
+  - 报告
+  - 生成报告
+  - report
+anti_patterns:
+  - 未提供文档来源时盲目生成
+success_rate: 1.0
+last_used_at: null
+required_tools: []
+max_duration_seconds: 300
+acl: []
+steps:
+  - action: greet
+    tool: null
+    on_failure: abort
