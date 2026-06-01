@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE / OS
+.vscode/
+.DS_Store
+.codeartsdoer/
+.arts/
+
+# Model weights (too large for GitHub)
+document/rag/weights/
+document/ocr/weights/
+assets/llm/
+assets/vision/
+model/
+
+# Logs and secrets
+logs/
+.env
+.env.*
+*.log
+
+# Runtime data (optional local artifacts)
+data/index/
+data/cache/

@@ -1,0 +1,20 @@
+main_prompt_path: prompts/main.txt
+
+rag_summarize_prompt_path: prompts/main.txt
+
+report_prompt_path:
+
+router_path: prompts/router.txt
+
+subPrompt:
+  OverviewPrompt:
+    desc: 用于生成概述等章节内容
+    path: prompts/Overview.txt
+  EngineeringConstructionConditionsPrompt:
+    desc: 用于生成工程建设条件等章节内容
+    path: prompts/EngineeringConstructionConditions.txt
+  RoadEngineeringDesignPrompt:
+    desc: 用于生成道路工程设计等章节内容
+    path: prompts/RoadEngineeringDesign.txt
+
+

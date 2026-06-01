@@ -1,0 +1,81 @@
+# 模型配置（企业级）
+# ModelPort Registry 使用此配置
+
+# 模型 Profile（构造参数）
+profiles:
+  dashscope_main:
+    provider: dashscope
+    model_name: qwen-max
+    api_key_env: DASHSCOPE_API_KEY
+    timeout: 60
+    
+  dashscope_router:
+    provider: dashscope
+    model_name: qwen3.5-27b
+    api_key_env: DASHSCOPE_API_KEY
+    timeout: 30
+    
+  dashscope_embedding:
+    provider: dashscope
+    model_name: text-embedding-v3
+    api_key_env: DASHSCOPE_API_KEY
+    
+  dashscope_rerank:
+    provider: dashscope
+    model_name: qwen3-vl-rerank
+    api_key_env: DASHSCOPE_API_KEY
+    
+  openai_main:
+    provider: openai
+    model_name: gpt-4
+    api_key_env: OPENAI_API_KEY
+    timeout: 60
+    
+  local_embedding:
+    provider: local
+    model_name: bge-small-zh-v1.5
+    model_path: document/rag/weights/bge-small-zh-v1.5
+
+# 角色 Role（业务使用）
+roles:
+  main_llm:
+    profile: dashscope_main
+    fallback_chain:
+      - dashscope_router
+      - openai_main
+    resilience:
+      max_retries: 3
+      retry_on_status: [502, 503, 504]
+      circuit_breaker:
+        failure_threshold: 5
+        recovery_timeout: 60
+        
+  router_llm:
+    profile: dashscope_router
+    resilience:
+      max_retries: 2
+      circuit_breaker:
+        failure_threshold: 3
+        recovery_timeout: 30
+        
+  embedding:
+    profile: local_embedding
+    cache:
+      enabled: true
+      ttl_seconds: 86400
+      
+  rerank:
+    profile: dashscope_rerank
+    
+  ocr:
+    provider: paddleocr
+    fallback_chain:
+      - tesseract
+
+# 提供商配置
+providers:
+  dashscope:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    
+  openai:
+    base_url: https://api.openai.com/v1

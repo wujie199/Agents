@@ -1,0 +1,8 @@
+
+wordPath: word/
+
+jsonPath_read: json/read.json
+
+jsonPath_save: json/save.json
+
+json_router: json/router.json

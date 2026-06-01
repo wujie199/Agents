@@ -1,0 +1,11 @@
+# DashScope 与 RAG 相关配置
+dashscope_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+# DashScope 文本重排序；留空则使用 SDK 默认 gte-rerank
+rerank_model_name: qwen3-vl-rerank
+
+# 重排后保留的文档条数
+rerank_top_n: 5
+
+# 注意：模型名称与 API 密钥位于 config/llm.yml
+# 请在 [config/llm.yml](config/llm.yml#L1-L20) 中查看 `chat_model_name` / `api_key`

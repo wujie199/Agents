@@ -1,0 +1,16 @@
+# 并发与批处理配置
+default:
+  max_parallel_sends: 5
+  max_intra_batch_workers: 3
+  default_batch_size: 10
+  min_batch_size: 1
+  max_batch_size: 50
+  max_rag_batch_queries: 10
+  max_embed_batch_size: 32
+
+# 租户级覆盖（可选）
+tenants:
+  tenant_premium:
+    max_parallel_sends: 10
+    default_batch_size: 20
+    max_batch_size: 100

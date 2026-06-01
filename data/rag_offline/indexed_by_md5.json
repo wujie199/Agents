@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "tenants": {
+    "default": {
+      "6d726f4604d9e7ebcf59a932ae9e9c00": {
+        "doc_id": "doc_6d726f4604d9e7eb",
+        "source_path": "/Users/wujie/python/Agents/document/rag/pdf/扫地机器人100问.pdf",
+        "file_md5": "6d726f4604d9e7ebcf59a932ae9e9c00",
+        "model_version": "bge-small-zh-v1.5-local",
+        "chunk_count": 100,
+        "vectors_written": 100,
+        "indexed_at": "2026-05-28T14:40:03.860752+00:00"
+      }
+    }
+  }
+}

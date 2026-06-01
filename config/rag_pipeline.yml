@@ -1,0 +1,74 @@
+# RAG 管道统一配置
+
+collection_name: agent
+
+enable_vector_index: true
+enable_graph_index: true
+
+chunk_size: 800
+chunk_overlap: 0
+chunk_strategy: faq
+default_top_k: 10
+rerank_top_n: 5
+enable_cache: true
+cache_ttl_seconds: 900
+model_version: bge-small-zh-v1.5-local
+embedding_batch_size: 32
+
+# 适配器 backend 见 document/rag/adapters/registry.py
+embedding:
+  backend: local_bge
+  model_path: null
+  device: null
+  normalize: true
+
+rerank:
+  backend: local_bge
+  model_path: null
+  device: null
+
+# 规则/关键词元数据打标（离线建库 step4，规则文件 config/metadata_tagging.yml）
+metadata:
+  enabled: true
+  backend: rule_keyword
+  rules_path: null
+  max_tags: 32
+  tag_filename: true
+
+ingest:
+  mode: ocr_only
+  routing: simplified
+  plain_text_formats: [txt, md]
+  ocr_backend: auto
+  language: ch
+  word_to_pdf: true
+  word_converter: libreoffice
+  pdf_dpi: 200
+  ocr_use_layout: true
+  enable_cleaning: true
+  ocr_postprocess: true
+  cleaning_level: standard
+
+retrieval:
+  primary_backend: vector
+  enable_hybrid: true
+  enable_vector_search: true
+  enable_bm25_search: true
+  vector_top_k: 10
+  bm25_top_k: 10
+  hybrid_weights: [0.5, 0.5]
+  fusion_strategy: weighted
+  fusion_top_n: 10
+  enable_rerank: true
+  rerank_top_n: 5
+  rerank_min_score: 0.8
+  use_mock_rerank_fallback: true
+  enable_router: false
+  auto_route: false
+  enable_graph: false
+  enable_sql: false
+
+rewrite:
+  enable_hyde: false
+  enable_multi_query: false
+  multi_query_count: 3
