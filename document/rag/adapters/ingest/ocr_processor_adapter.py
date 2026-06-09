@@ -1,4 +1,4 @@
-"""通过 document/ocr/processor.py（ansisy + ocr_v5）进行统一 OCR 摄取。"""
+"""通过 document/ocr/processor.py（UniversalOcrPipeline）进行统一 OCR 摄取。"""
 
 import logging
 import os
@@ -36,12 +36,30 @@ class OcrProcessorIngestAdapter:
         word_to_pdf: bool = True,
         layout_model_dir: Optional[str] = None,
         ocr_model_dir: Optional[str] = None,
+        model_root: Optional[str] = None,
+        device: str = "cpu",
+        preprocess_mode: str = "auto",
+        enable_formula: bool = True,
+        formula_model_name: Optional[str] = None,
+        max_attempts: int = 3,
+        fast_mode: bool = True,
+        table_e2e: bool = False,
+        enable_mkldnn: bool = True,
     ):
         self._pdf_dpi = pdf_dpi
         self._use_layout = use_layout
         self._word_to_pdf = word_to_pdf
         self._layout_model_dir = layout_model_dir
         self._ocr_model_dir = ocr_model_dir
+        self._model_root = model_root or os.environ.get("OCR_MODEL_ROOT")
+        self._device = device
+        self._preprocess_mode = preprocess_mode
+        self._enable_formula = enable_formula
+        self._formula_model_name = formula_model_name
+        self._max_attempts = max_attempts
+        self._fast_mode = fast_mode
+        self._table_e2e = table_e2e
+        self._enable_mkldnn = enable_mkldnn
         self._processor = None
         self._temp_dirs: List[str] = []
 
@@ -59,11 +77,23 @@ class OcrProcessorIngestAdapter:
         if self._processor is None:
             from document.ocr.processor import OCRProcessor
 
-            kwargs: Dict[str, Any] = {}
+            kwargs: Dict[str, Any] = {
+                "device": self._device,
+                "preprocess_mode": self._preprocess_mode,
+                "enable_formula": self._enable_formula,
+                "max_attempts": self._max_attempts,
+                "fast_mode": self._fast_mode,
+                "table_e2e": self._table_e2e,
+                "enable_mkldnn": self._enable_mkldnn,
+            }
+            if self._model_root:
+                kwargs["model_root"] = self._model_root
             if self._layout_model_dir:
                 kwargs["layout_model_dir"] = self._layout_model_dir
             if self._ocr_model_dir:
                 kwargs["ocr_model_dir"] = self._ocr_model_dir
+            if self._formula_model_name:
+                kwargs["formula_model_name"] = self._formula_model_name
             self._processor = OCRProcessor(**kwargs)
         return self._processor
 
@@ -127,6 +157,7 @@ class OcrProcessorIngestAdapter:
             for page in ocr_result.pages:
                 page_tables = getattr(page, "tables", []) or []
                 all_tables.extend(page_tables)
+                page_meta = getattr(page, "metadata", {}) or {}
                 pages.append(
                     {
                         "page_num": page.page_number,
@@ -134,12 +165,19 @@ class OcrProcessorIngestAdapter:
                         "char_count": len(page.full_text),
                         "region_count": len(page.regions),
                         "table_count": len(page_tables),
+                        "qc_status": page_meta.get("qc_status"),
                     }
                 )
             metadata["total_pages"] = ocr_result.total_pages
+            doc_meta = getattr(ocr_result, "metadata", {}) or {}
+            if doc_meta.get("document_ir"):
+                metadata["document_ir"] = doc_meta["document_ir"]
+            if doc_meta.get("qc_summary"):
+                metadata["qc_summary"] = doc_meta["qc_summary"]
         else:
             full_text = ocr_result.full_text
             all_tables = getattr(ocr_result, "tables", []) or []
+            page_meta = getattr(ocr_result, "metadata", {}) or {}
             pages.append(
                 {
                     "page_num": 1,
@@ -147,14 +185,20 @@ class OcrProcessorIngestAdapter:
                     "char_count": len(full_text),
                     "region_count": len(ocr_result.regions),
                     "table_count": len(all_tables),
+                    "qc_status": page_meta.get("qc_status"),
                 }
             )
             metadata["total_pages"] = 1
+            if page_meta.get("document_ir"):
+                metadata["document_ir"] = page_meta["document_ir"]
 
         metadata["ingest_backend"] = "ocr_processor"
+        metadata["ocr_pipeline"] = "UniversalOcrPipeline"
         metadata["ocr_source_path"] = source_path
         metadata["char_count"] = len(full_text)
         metadata["table_count"] = len(all_tables)
+        if self._model_root:
+            metadata["ocr_model_root"] = self._model_root
 
         status = IngestStatus.SUCCESS if full_text.strip() else IngestStatus.PARTIAL
         return IngestResult(

@@ -1,0 +1,19 @@
+# 企业级 Chat Agent 配置示例
+# 配合 MEMORY_CONFIG=config/memory.production.example.yml 使用
+
+chat:
+  enable_rag: true
+  max_history_turns: 12
+  max_history_chars: 16000
+  rag_min_score: 0.35
+  enable_rag_gating: true
+  session_search_prefetch_scope: auto
+  skill_prefetch: true
+  l4_profile_prefetch: true
+  enable_memory_tools: true
+  enable_skill_tools: true
+  enable_l4_tools: true
+  remember_require_hitl: true
+  interactive_flush_buffer: true
+  enable_l1_extract_on_finalize: true
+  use_llm_l1_extract: true

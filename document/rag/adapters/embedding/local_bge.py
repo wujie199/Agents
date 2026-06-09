@@ -5,11 +5,13 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-_log = logging.getLogger("document.rag.adapters.embedding.local_bge")
-
-_DEFAULT_MODEL_DIR = (
-    Path(__file__).resolve().parents[2] / "weights" / "bge-small-zh-v1.5"
+from document.model_mount import (
+    DEFAULT_EMBEDDING_MODEL,
+    require_mounted_volume,
+    unmounted_reminder,
 )
+
+_log = logging.getLogger("document.rag.adapters.embedding.local_bge")
 
 
 class LocalBgeEmbedding:
@@ -31,13 +33,23 @@ class LocalBgeEmbedding:
                 resolved = resolved.resolve()
             self._model_dir = str(resolved)
         else:
-            self._model_dir = str(_DEFAULT_MODEL_DIR)
+            self._model_dir = str(DEFAULT_EMBEDDING_MODEL)
+
+        require_mounted_volume(
+            self._model_dir,
+            purpose="RAG 本地 embedding（bge-small-zh-v1.5）",
+            env_hint="可在 config/rag_pipeline.yml 的 embedding.model_path 或 RAG_EMBEDDING_MODEL 指定路径",
+        )
 
         model_path = Path(self._model_dir)
         if not (model_path / "config.json").is_file():
             raise FileNotFoundError(
                 f"本地 embedding 目录不完整: {self._model_dir}\n"
-                "请确认存在 config.json 与 model.safetensors（或 pytorch_model.bin）"
+                + unmounted_reminder(
+                    path=self._model_dir,
+                    purpose="RAG embedding 权重缺失",
+                    env_hint="embedding.model_path",
+                )
             )
 
         self._normalize = normalize_embeddings

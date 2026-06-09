@@ -9,6 +9,8 @@ from core.ports.external_memory import ExternalMemoryProvider
 from core.ports.memory import (
     MemoryDelta,
     PromptMemorySnapshot,
+    SessionFragment,
+    SessionSearchResult,
     SkillOutcome,
     SkillSummary,
     ToolCallRecord,
@@ -27,8 +29,82 @@ from agent_platform.memory.adapters.noop_external_adapter import (
 from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapter
 from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
 from agent_platform.memory.adapters.session_search_fusion import rrf_merge_messages
+from agent_platform.memory.adapters.session_rerank_utils import rerank_message_dicts
+from app.agents.text_sanitize import (
+    has_model_reasoning,
+    sanitize_search_fragment_content,
+    strip_model_reasoning,
+)
 
 SearchScope = Literal["session", "user"]
+
+
+# #region agent log
+def _session_search_cache_debug(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        from app.agents.memory_runtime_debug import is_memory_runtime_debug
+
+        if not is_memory_runtime_debug():
+            return
+    except ImportError:
+        return
+    import os
+    import time
+    from pathlib import Path
+
+    payload = {
+        "sessionId": "d0a1fc",
+        "runId": "session-search-cache",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        default_log = (
+            Path(__file__).resolve().parents[3] / ".cursor" / "debug-d0a1fc.log"
+        )
+        log_path = Path(os.environ.get("MEMORY_DEBUG_LOG", str(default_log)))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    try:
+        from app.agents.memory_runtime_debug import (
+            is_memory_runtime_debug,
+            memory_debug_console_enabled,
+        )
+
+        if is_memory_runtime_debug() and memory_debug_console_enabled():
+            hit = data.get("cache_hit")
+            tag = "HIT" if hit is True else ("MISS" if hit is False else "—")
+            print(
+                f"[session_search cache {tag}] {message} "
+                f"adapter={data.get('cache_adapter', '?')} "
+                f"key={str(data.get('cache_key', ''))[:48]}",
+                flush=True,
+            )
+    except ImportError:
+        pass
+
+
+# #endregion
+
+
+def _estimate_token_count(text: str) -> int:
+    try:
+        from utils.token_counter import count_tokens
+
+        return count_tokens(text or "")
+    except Exception:
+        return max(1, len(text or "") // 4)
 
 
 class MemoryPortAdapter:
@@ -59,11 +135,25 @@ class MemoryPortAdapter:
         enable_cold_archive: bool = False,
         cold_archive_prefix: str = "l2/cold",
         cold_archive_compress: bool = True,
+        session_search_cold_fallback: bool = True,
+        session_search_rerank: bool = True,
+        cold_archive_search_scan_limit: int = 100,
+        cold_archive_keep_vectors: bool = True,
+        session_vector_auto_reindex: bool = True,
+        reindex_batch_size: int = 200,
+        index_port: Any = None,
+        cold_archive_encrypt_at_rest: bool = False,
+        encryption_key: Optional[str] = None,
+        external_merge_on_finalize: bool = True,
+        purge_delete_external_audit: bool = True,
+        purge_tenant_l4_strip_user_keys: bool = True,
     ):
         self._archive_db = archive_db
+        self._index_port = index_port
         self._privacy = privacy
         self._skill_memory = skill_memory
         self._summarizer = summarizer or TruncatingSummarizerAdapter()
+        self._truncate_summarizer = TruncatingSummarizerAdapter(max_chars=2000)
         self._compressor = compressor or TruncatingHotMemoryCompressorAdapter()
         self._external = external_memory or NoOpExternalMemoryAdapter()
         self._cache = cache
@@ -71,9 +161,18 @@ class MemoryPortAdapter:
         self._vector_index = session_vector_index
         self._session_hybrid_search = session_hybrid_search
         self._session_search_cache_ttl = session_search_cache_ttl
+        self._session_search_cold_fallback = session_search_cold_fallback
+        self._session_search_rerank = session_search_rerank
+        self._cold_archive_keep_vectors = cold_archive_keep_vectors
+        self._session_vector_auto_reindex = session_vector_auto_reindex
+        self._reindex_batch_size = reindex_batch_size
+        self._vector_version_checked = False
         self._retention_days = retention_days
         self._hot_max = hot_memory_max_chars
         self._user_max = user_memory_max_chars
+        self._external_merge_on_finalize = external_merge_on_finalize
+        self._purge_delete_external_audit = purge_delete_external_audit
+        self._purge_tenant_l4_strip_user_keys = purge_tenant_l4_strip_user_keys
 
         self._hot = hot_memory or HotMemoryFileAdapter(
             store_dir=store_dir,
@@ -91,8 +190,46 @@ class MemoryPortAdapter:
                 object_store,
                 prefix=cold_archive_prefix,
                 compress=cold_archive_compress,
+                search_scan_limit=cold_archive_search_scan_limit,
+                encrypt_at_rest=cold_archive_encrypt_at_rest,
+                encryption_key=encryption_key,
             )
         self._logger = logging.getLogger(__name__)
+
+    async def _ensure_session_vector_index_version(self) -> None:
+        if self._vector_index is None or self._vector_version_checked:
+            return
+
+        self._vector_version_checked = True
+        is_current = getattr(self._vector_index, "is_version_current", None)
+        if is_current is None or is_current():
+            return
+
+        stored = getattr(self._vector_index, "get_stored_version", lambda: "?")()
+        expected = getattr(self._vector_index, "index_version", "?")
+        count_fn = getattr(getattr(self._vector_index, "_vector", None), "count", None)
+        collection = getattr(self._vector_index, "_collection", "")
+        if count_fn is not None and count_fn(collection) == 0:
+            marker = getattr(self._vector_index, "mark_index_current", None)
+            if marker:
+                marker()
+            return
+
+        if not self._session_vector_auto_reindex:
+            self._logger.warning(
+                "Session vector index version mismatch stored=%s expected=%s; "
+                "run reindex or set session_vector_auto_reindex_on_version_change",
+                stored,
+                expected,
+            )
+            return
+
+        self._logger.info(
+            "Session vector index version mismatch stored=%s expected=%s; reindexing",
+            stored,
+            expected,
+        )
+        await self.reindex_session_vectors(batch_size=self._reindex_batch_size)
 
     def compose_prompt_snapshot(
         self, context: RequestContext
@@ -120,14 +257,8 @@ class MemoryPortAdapter:
         for delta in pending:
             await self.apply_memory_delta(context, delta)
 
-        facts = await self._external.fetch_profile_facts(
-            context.user_id, context.tenant_id
-        )
-        for fact in facts:
-            await self.apply_memory_delta(
-                context,
-                MemoryDelta(key=fact.key, value=fact.value, source="user"),
-            )
+        if self._external_merge_on_finalize:
+            await self._merge_l4_facts_into_user(context)
 
         memory_raw = self._hot.get_raw_memory(context.tenant_id)
         if len(memory_raw) > self._hot_max:
@@ -180,6 +311,7 @@ class MemoryPortAdapter:
             self._logger.warning("Archive DB not configured, turn not persisted")
             return
 
+        await self._ensure_session_vector_index_version()
         await self.ensure_session(context)
         ts = turn.ts or datetime.now().isoformat()
         record = {
@@ -188,7 +320,7 @@ class MemoryPortAdapter:
             "role": turn.role,
             "content": turn.content,
             "ts": ts,
-            "token_count": len(turn.content or "") // 4,
+            "token_count": _estimate_token_count(turn.content or ""),
             "redacted": False,
             "metadata_json": json.dumps(
                 {"tool_calls": turn.tool_calls, "trace_id": turn.trace_id},
@@ -238,6 +370,19 @@ class MemoryPortAdapter:
         if self._privacy:
             row = self._privacy.redact_for_storage(row)
         await self._archive_db.insert_tool_call(row)
+        if self._vector_index is not None:
+            indexer = getattr(self._vector_index, "index_tool_call", None)
+            if indexer is not None:
+                try:
+                    await indexer(
+                        {
+                            **row,
+                            "tenant_id": context.tenant_id,
+                            "user_id": context.user_id,
+                        }
+                    )
+                except Exception as e:
+                    self._logger.warning("Session vector tool_call index failed: %s", e)
 
     async def list_turns(
         self, context: RequestContext, limit: int = 100, offset: int = 0
@@ -298,6 +443,11 @@ class MemoryPortAdapter:
             value = await value
         return value
 
+    def _cache_adapter_label(self) -> str:
+        if self._cache is None:
+            return "none"
+        return type(self._cache).__name__
+
     async def _cache_set(self, key: str, value: str) -> None:
         if self._cache is None:
             return
@@ -307,6 +457,19 @@ class MemoryPortAdapter:
         result = setter(key, value, ttl_seconds=self._session_search_cache_ttl)
         if hasattr(result, "__await__"):
             await result
+        # #region agent log
+        _session_search_cache_debug(
+            "A",
+            "memory_port_adapter._cache_set",
+            "session_search cache write",
+            {
+                "cache_adapter": self._cache_adapter_label(),
+                "cache_key": key,
+                "summary_len": len(value or ""),
+                "ttl_seconds": self._session_search_cache_ttl,
+            },
+        )
+        # #endregion
 
     def _session_search_cache_key(
         self,
@@ -314,10 +477,19 @@ class MemoryPortAdapter:
         query: str,
         limit: int,
         scope: SearchScope,
+        *,
+        use_llm_summary: bool | None = None,
+        prefer_user_role: bool = False,
     ) -> str:
+        if use_llm_summary is not False:
+            mode = "llm"
+        elif prefer_user_role:
+            mode = "truncate_user"
+        else:
+            mode = "truncate"
         raw = (
             f"{context.tenant_id}:{context.user_id}:"
-            f"{context.session_id}:{scope}:{query}:{limit}"
+            f"{context.session_id}:{scope}:{query}:{limit}:{mode}"
         )
         digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
         if hasattr(self._cache, "build_key"):
@@ -332,10 +504,25 @@ class MemoryPortAdapter:
         invalidator = getattr(self._cache, "invalidate_pattern", None)
         if invalidator is None:
             return
-        pattern = f"*{context.tenant_id}*sess*"
+        pattern = f"*{context.tenant_id}:*:sess:*"
         result = invalidator(pattern)
         if hasattr(result, "__await__"):
-            await result
+            result = await result
+        deleted = result if isinstance(result, int) else 0
+        if deleted > 0:
+            # #region agent log
+            _session_search_cache_debug(
+                "C",
+                "memory_port_adapter._invalidate_session_search_cache",
+                "session_search cache invalidated",
+                {
+                    "cache_adapter": self._cache_adapter_label(),
+                    "tenant_id": context.tenant_id,
+                    "pattern": pattern,
+                    "keys_deleted": deleted,
+                },
+            )
+            # #endregion
 
     def _filter_messages_by_acl(
         self, messages: List[dict], context: RequestContext
@@ -352,16 +539,78 @@ class MemoryPortAdapter:
             filtered.append(msg)
         return filtered
 
+    def _pick_summarizer(self, use_llm_summary: bool | None):
+        if use_llm_summary is False:
+            return self._truncate_summarizer
+        return self._summarizer
+
     @staticmethod
     def _format_search_fragment(msg: dict, scope: SearchScope) -> str:
         role = msg.get("role", "user")
         ts = msg.get("ts", "")
-        content = (msg.get("content") or "").strip()
+        content = sanitize_search_fragment_content(
+            msg.get("content"), role=str(role)
+        )
+        if not content:
+            return ""
         preview = content if len(content) <= 200 else content[:200] + "..."
         if scope == "user":
             session_id = msg.get("session_id", "")
             return f"[session={session_id}] [{ts}] {role}: {preview}"
         return f"[{ts}] {role}: {preview}"
+
+    def _mask_search_text(self, text: str) -> str:
+        if self._privacy is None:
+            return text
+        masker = getattr(self._privacy, "mask_text", None)
+        if masker is None:
+            return text
+        return masker(text)
+
+    async def _search_tool_calls(
+        self,
+        query: str,
+        context: RequestContext,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> List[dict]:
+        searcher = getattr(self._archive_db, "search_tool_calls", None)
+        if searcher is None:
+            return []
+        try:
+            return await searcher(
+                session_id=session_id,
+                user_id=context.user_id,
+                tenant_id=context.tenant_id,
+                query=query,
+                limit=limit,
+            )
+        except Exception as e:
+            self._logger.warning("Tool call search failed: %s", e)
+            return []
+
+    async def _search_cold_messages(
+        self,
+        query: str,
+        context: RequestContext,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> List[dict]:
+        if self._cold_archive is None or not self._session_search_cold_fallback:
+            return []
+        try:
+            return await self._cold_archive.search_cold_archives(
+                query,
+                context.tenant_id,
+                context.user_id,
+                session_id=session_id,
+                limit=limit,
+            )
+        except Exception as e:
+            self._logger.warning("Cold archive search failed: %s", e)
+            return []
 
     async def _search_archive_messages(
         self,
@@ -378,28 +627,204 @@ class MemoryPortAdapter:
             query=query,
             limit=limit,
         )
-        if self._vector_index is None:
-            return fts_messages
+        tool_messages = await self._search_tool_calls(
+            query, context, session_id=session_id, limit=limit
+        )
 
-        try:
-            vector_messages = await self._vector_index.search(
-                query,
-                context.tenant_id,
-                context.user_id,
-                session_id=session_id,
-                limit=limit,
+        ranked_lists = []
+        if fts_messages:
+            ranked_lists.append(fts_messages)
+        if tool_messages:
+            ranked_lists.append(tool_messages)
+
+        if self._vector_index is not None:
+            try:
+                vector_messages = await self._vector_index.search(
+                    query,
+                    context.tenant_id,
+                    context.user_id,
+                    session_id=session_id,
+                    limit=limit,
+                )
+                if vector_messages:
+                    ranked_lists.append(vector_messages)
+            except Exception as e:
+                self._logger.warning("Session vector search failed: %s", e)
+
+        if not ranked_lists:
+            online: List[dict] = []
+        elif len(ranked_lists) == 1:
+            online = ranked_lists[0]
+        elif self._session_hybrid_search:
+            online = rrf_merge_messages(ranked_lists)[:limit]
+        else:
+            online = ranked_lists[0][:limit]
+
+        cold = await self._search_cold_messages(
+            query, context, session_id=session_id, limit=limit
+        )
+        if not online:
+            merged = cold
+        elif not cold:
+            merged = online
+        else:
+            merged = rrf_merge_messages([online, cold])[: limit * 2]
+
+        if self._session_search_rerank and merged:
+            merged = rerank_message_dicts(query, merged, top_n=limit * 2)
+        return merged[: limit * 3]
+
+    async def _search_user_messages_fallback(
+        self,
+        query: str,
+        context: RequestContext,
+        session_id: Optional[str],
+        limit: int,
+    ) -> List[dict]:
+        """混合检索仅命中 assistant 时，回退到 user 发言关键词匹配。"""
+        if self._archive_db is None:
+            return []
+        where: dict[str, str] = {}
+        if session_id:
+            where["session_id"] = session_id
+        rows = await self._archive_db.select_many(
+            "messages",
+            ["message_id", "session_id", "role", "content", "ts"],
+            where=where or None,
+            order_by="ts DESC",
+            limit=min(300, limit * 40),
+        )
+        user_rows = [r for r in rows if str(r.get("role") or "") == "user"]
+        q = (query or "").strip()
+        tokens = [t for t in q.split() if len(t) >= 2]
+        if not tokens:
+            return user_rows[:limit]
+        scored: List[tuple[int, dict]] = []
+        for row in user_rows:
+            content = str(row.get("content") or "")
+            score = sum(1 for t in tokens if t in content)
+            if score > 0:
+                scored.append((score, row))
+        if not scored:
+            return []
+        scored.sort(key=lambda x: (-x[0], str(x[1].get("ts") or "")))
+        return [row for _, row in scored[:limit]]
+
+    def _messages_to_fragments(
+        self, messages: List[dict], scope: SearchScope
+    ) -> List[SessionFragment]:
+        fragments: List[SessionFragment] = []
+        for msg in messages:
+            role = str(msg.get("role") or "user")
+            content = sanitize_search_fragment_content(
+                msg.get("content"), role=role
             )
-        except Exception as e:
-            self._logger.warning("Session vector search failed: %s", e)
-            return fts_messages
+            if not content:
+                continue
+            fragments.append(
+                SessionFragment(
+                    message_id=str(msg.get("message_id") or ""),
+                    session_id=str(msg.get("session_id") or ""),
+                    role=str(msg.get("role") or "user"),
+                    content=content,
+                    ts=str(msg.get("ts") or ""),
+                    score=float(msg.get("rerank_score") or msg.get("score") or 0.0),
+                    source=str(msg.get("source") or "online"),
+                )
+            )
+        return fragments
 
-        if not vector_messages:
-            return fts_messages
-        if not fts_messages:
-            return vector_messages
-        if self._session_hybrid_search:
-            return rrf_merge_messages([fts_messages, vector_messages])[:limit]
-        return fts_messages
+    async def session_search_detail(
+        self,
+        query: str,
+        context: RequestContext,
+        limit: int = 5,
+        scope: SearchScope = "session",
+        *,
+        use_llm_summary: bool | None = None,
+        prefer_user_role: bool = False,
+    ) -> SessionSearchResult:
+        if self._archive_db is None:
+            return SessionSearchResult(
+                summary="Archive search not available", sources=[]
+            )
+
+        await self._ensure_session_vector_index_version()
+        session_id = context.session_id if scope == "session" else None
+        messages = await self._search_archive_messages(
+            query,
+            context,
+            session_id=session_id,
+            limit=limit * 3,
+        )
+        messages = self._filter_messages_by_acl(messages, context)
+        if prefer_user_role:
+            user_msgs = [
+                m for m in messages if str(m.get("role") or "") == "user"
+            ]
+            if user_msgs:
+                messages = user_msgs
+            else:
+                fallback = await self._search_user_messages_fallback(
+                    query, context, session_id=session_id, limit=limit * 3
+                )
+                if fallback:
+                    messages = fallback
+        if not messages:
+            return SessionSearchResult(
+                summary="No relevant messages found", sources=[]
+            )
+
+        fragments = self._messages_to_fragments(messages[: limit * 3], scope)
+        if not fragments:
+            return SessionSearchResult(
+                summary="No relevant messages found", sources=[]
+            )
+
+        selected = fragments[:limit]
+        if use_llm_summary is False:
+            user_frags = [f for f in fragments if f.role == "user"]
+            if user_frags:
+                selected = user_frags[:limit]
+            else:
+                # 知识预检索：无 user 命中时不回退 assistant 脏片段
+                return SessionSearchResult(
+                    summary="No relevant messages found", sources=[]
+                )
+
+        text_fragments = [
+            frag
+            for f in selected
+            if (frag := self._format_search_fragment(
+                {
+                    "session_id": f.session_id,
+                    "role": f.role,
+                    "ts": f.ts,
+                    "content": f.content,
+                },
+                scope,
+            ))
+        ]
+        if not text_fragments:
+            return SessionSearchResult(
+                summary="No relevant messages found", sources=[]
+            )
+
+        summarizer = self._pick_summarizer(use_llm_summary)
+        summary = await summarizer.summarize(text_fragments, query)
+        summary = strip_model_reasoning(summary)
+        if has_model_reasoning(summary):
+            summary = await self._truncate_summarizer.summarize(
+                text_fragments, query
+            )
+            summary = strip_model_reasoning(summary)
+        summary = self._mask_search_text(summary)
+        sources = sorted({f.source for f in selected})
+        return SessionSearchResult(
+            summary=summary,
+            fragments=selected,
+            sources=sources,
+        )
 
     async def session_search(
         self,
@@ -407,39 +832,69 @@ class MemoryPortAdapter:
         context: RequestContext,
         limit: int = 5,
         scope: SearchScope = "session",
+        *,
+        use_llm_summary: bool | None = None,
+        prefer_user_role: bool = False,
     ) -> str:
         if self._archive_db is None:
             return "Archive search not available"
 
-        cache_key = self._session_search_cache_key(context, query, limit, scope)
+        cache_key = self._session_search_cache_key(
+            context,
+            query,
+            limit,
+            scope,
+            use_llm_summary=use_llm_summary,
+            prefer_user_role=prefer_user_role,
+        )
         cached = await self._cache_get(cache_key)
+        # #region agent log
+        _session_search_cache_debug(
+            "A" if cached else "B",
+            "memory_port_adapter.session_search",
+            "session_search cache lookup",
+            {
+                "cache_hit": bool(cached),
+                "cache_adapter": self._cache_adapter_label(),
+                "cache_key": cache_key,
+                "query_preview": (query or "")[:80],
+                "scope": scope,
+                "limit": limit,
+                "session_id": context.session_id,
+                "tenant_id": context.tenant_id,
+                "user_id": context.user_id,
+                "summary_len": len(cached or "") if cached else 0,
+            },
+        )
+        # #endregion
         if cached:
             return cached
 
-        session_id = context.session_id if scope == "session" else None
-
         try:
-            messages = await self._search_archive_messages(
+            detail = await self.session_search_detail(
                 query,
                 context,
-                session_id=session_id,
-                limit=limit * 3,
+                limit=limit,
+                scope=scope,
+                use_llm_summary=use_llm_summary,
+                prefer_user_role=prefer_user_role,
             )
-            messages = self._filter_messages_by_acl(messages, context)
-            if not messages:
-                return "No relevant messages found"
-
-            fragments = [
-                self._format_search_fragment(msg, scope)
-                for msg in messages[: limit * 3]
-            ]
-
-            if not fragments:
-                return "No relevant messages found"
-
-            result = await self._summarizer.summarize(fragments[:limit], query)
-            await self._cache_set(cache_key, result)
-            return result
+            if not detail.fragments:
+                # #region agent log
+                _session_search_cache_debug(
+                    "E",
+                    "memory_port_adapter.session_search",
+                    "session_search no fragments — skip cache write",
+                    {
+                        "cache_adapter": self._cache_adapter_label(),
+                        "cache_key": cache_key,
+                        "query_preview": (query or "")[:80],
+                    },
+                )
+                # #endregion
+                return ""
+            await self._cache_set(cache_key, detail.summary)
+            return detail.summary
         except Exception as e:
             self._logger.error("Session search failed: %s", e)
             return f"Search error: {e}"
@@ -520,7 +975,17 @@ class MemoryPortAdapter:
                 )
             )
 
-        return {"indexed": indexed, "errors": errors, "batches": batches}
+        marker = getattr(self._vector_index, "mark_index_current", None)
+        if marker is not None and errors == 0:
+            marker()
+
+        version = getattr(self._vector_index, "index_version", None)
+        return {
+            "indexed": indexed,
+            "errors": errors,
+            "batches": batches,
+            "index_version": version,
+        }
 
     async def skill_search(
         self,
@@ -545,17 +1010,111 @@ class MemoryPortAdapter:
                 success=False,
                 error="SkillMemoryAdapter not configured",
             )
-        result = self._skill_memory.run(skill_id, inputs, run_context)
-        await self.record_skill_outcome(
-            context,
-            SkillOutcome(
-                skill_id=skill_id,
-                success=result.success,
-                steps_executed=result.steps_executed,
-                error=result.error,
-            ),
+        result = await self._skill_memory.run_and_finalize(
+            skill_id, inputs, run_context, context
         )
         return result
+
+    async def list_skills(self, context: RequestContext) -> List[dict]:
+        if self._skill_memory is None:
+            return []
+        return self._skill_memory.list_skills(context.tenant_id)
+
+    async def get_skill(
+        self, skill_id: str, context: RequestContext
+    ) -> Optional[dict]:
+        if self._skill_memory is None:
+            return None
+        return self._skill_memory.get_skill_detail(skill_id, context.tenant_id)
+
+    async def extract_skill_draft(
+        self,
+        context: RequestContext,
+        title: str,
+        triggers: List[str],
+        steps: List[dict],
+        skill_id: Optional[str] = None,
+    ) -> str:
+        if self._skill_memory is None:
+            raise RuntimeError("SkillMemoryAdapter not configured")
+        return self._skill_memory.extract_draft(
+            context.tenant_id, title, triggers, steps, skill_id=skill_id
+        )
+
+    async def list_skill_drafts(self, context: RequestContext) -> List[dict]:
+        if self._skill_memory is None:
+            return []
+        return self._skill_memory.list_drafts(context.tenant_id)
+
+    async def publish_skill(
+        self,
+        context: RequestContext,
+        skill_id: str,
+        *,
+        remove_draft: bool = True,
+    ) -> dict:
+        if self._skill_memory is None:
+            return {"success": False, "reason": "skill_memory_not_configured"}
+        return self._skill_memory.publish_skill(
+            context.tenant_id, skill_id, remove_draft=remove_draft
+        )
+
+    async def deprecate_skill(
+        self, context: RequestContext, skill_id: str
+    ) -> dict:
+        if self._skill_memory is None:
+            return {"success": False, "reason": "skill_memory_not_configured"}
+        return self._skill_memory.deprecate_skill(context.tenant_id, skill_id)
+
+    async def activate_skill(
+        self, context: RequestContext, skill_id: str
+    ) -> dict:
+        if self._skill_memory is None:
+            return {"success": False, "reason": "skill_memory_not_configured"}
+        return self._skill_memory.activate_skill(context.tenant_id, skill_id)
+
+    async def sync_skills_from(
+        self,
+        source_dir: str,
+        *,
+        remove_missing: bool = False,
+    ) -> dict:
+        if self._skill_memory is None:
+            return {"success": False, "reason": "skill_memory_not_configured"}
+        return self._skill_memory.sync_from_source(
+            source_dir, remove_missing=remove_missing
+        )
+
+    async def list_skill_runs(
+        self,
+        context: RequestContext,
+        *,
+        skill_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[dict]:
+        if self._skill_memory is None:
+            return []
+        return await self._skill_memory.list_skill_runs(
+            context.tenant_id,
+            user_id=context.user_id,
+            skill_id=skill_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def purge_tenant_l3(
+        self,
+        tenant_id: str,
+        *,
+        delete_runs: bool = True,
+    ) -> dict:
+        if self._skill_memory is None:
+            return {"success": False, "reason": "skill_memory_not_configured"}
+        result = await self._skill_memory.purge_l3_for_tenant_async(
+            tenant_id, delete_runs=delete_runs
+        )
+        return {"success": True, **result}
 
     async def record_skill_outcome(
         self, context: RequestContext, outcome: SkillOutcome
@@ -569,14 +1128,135 @@ class MemoryPortAdapter:
     ) -> Optional[Any]:
         return await self._external.resolve_entity(mention, context)
 
-    async def purge_user_data(self, tenant_id: str, user_id: str) -> None:
+    async def fetch_profile_facts(
+        self, tenant_id: str, user_id: str
+    ) -> List[Any]:
+        facts = await self._external.fetch_profile_facts(user_id, tenant_id)
+        return [
+            {"key": f.key, "value": f.value, "source": f.source}
+            for f in facts
+        ]
+
+    async def list_profile_users(self, tenant_id: str) -> List[str]:
+        return await self._external.list_profile_users(tenant_id)
+
+    async def get_profile(self, tenant_id: str, user_id: str) -> dict:
+        return await self._external.get_profile(tenant_id, user_id)
+
+    async def import_profile(
+        self, tenant_id: str, user_id: str, profile: dict
+    ) -> None:
+        await self._external.save_profile(tenant_id, user_id, profile)
+
+    async def set_profile_facts(
+        self, tenant_id: str, user_id: str, facts: List[dict]
+    ) -> int:
+        return await self._external.upsert_profile_facts(
+            tenant_id, user_id, facts
+        )
+
+    async def purge_tenant_l4(self, tenant_id: str) -> dict:
+        keys_by_user: dict[str, List[str]] = {}
+        profile_users = await self._external.list_profile_users(tenant_id)
+        for user_id in profile_users:
+            facts = await self._external.fetch_profile_facts(user_id, tenant_id)
+            keys_by_user[user_id] = [f.key for f in facts if f.key]
+
+        deleted = await self._external.purge_tenant_profiles(tenant_id)
+
+        user_keys_stripped = 0
+        if self._purge_tenant_l4_strip_user_keys:
+            user_ids = set(profile_users) | set(self._hot.list_user_ids(tenant_id))
+            for user_id in user_ids:
+                keys = keys_by_user.get(user_id, [])
+                user_keys_stripped += self._hot.strip_user_keys(
+                    tenant_id, user_id, keys
+                )
+
+        audit_deleted = 0
+        if self._purge_delete_external_audit:
+            from agent_platform.memory.adapters.compliance_utils import (
+                delete_external_fact_audit_for_tenant,
+            )
+
+            audit_deleted = await delete_external_fact_audit_for_tenant(
+                self._archive_db, tenant_id
+            )
+
+        return {
+            "tenant_id": tenant_id,
+            "profiles_deleted": deleted,
+            "user_keys_stripped": user_keys_stripped,
+            "external_audit_deleted": audit_deleted,
+            "success": True,
+        }
+
+    async def _merge_l4_facts_into_user(
+        self, context: RequestContext
+    ) -> List[dict]:
+        from agent_platform.memory.adapters.compliance_utils import (
+            append_audit_log,
+            content_sha256,
+        )
+
+        facts = await self._external.fetch_profile_facts(
+            context.user_id, context.tenant_id
+        )
+        if not facts:
+            return []
+        deltas = [
+            MemoryDelta(key=f.key, value=f.value, source=f.source or "external")
+            for f in facts
+        ]
+        changes = self._hot.merge_user_facts_upsert(
+            context.tenant_id, context.user_id, deltas
+        )
+        self._hot.invalidate_cache(context.tenant_id, context.user_id)
+        for change in changes:
+            await append_audit_log(
+                self._archive_db,
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                resource_type="external_fact",
+                resource_id=str(change["key"]),
+                content_hash=content_sha256(str(change.get("new") or "")),
+                action="merge",
+                meta=change,
+            )
+        return changes
+
+    async def purge_user_data(self, tenant_id: str, user_id: str) -> dict:
+        from agent_platform.memory.adapters.rag_purge_utils import (
+            purge_rag_documents_for_user,
+        )
+
+        summary: dict = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "messages_anonymized": 0,
+            "cold_archives_deleted": 0,
+            "rag_documents_deleted": 0,
+            "rag_delete_errors": 0,
+        }
+
+        l4_keys: List[str] = []
+        try:
+            facts = await self._external.fetch_profile_facts(user_id, tenant_id)
+            l4_keys = [f.key for f in facts if f.key]
+        except Exception as e:
+            self._logger.warning("Fetch L4 facts before purge failed: %s", e)
+
         self._hot.clear_user(tenant_id, user_id)
         if self._archive_db is not None:
-            await self._archive_db.anonymize_user_data(tenant_id, user_id)
+            summary["messages_anonymized"] = await self._archive_db.anonymize_user_data(
+                tenant_id, user_id
+            )
         if self._cold_archive is not None:
             try:
-                await self._cold_archive.delete_cold_archives_for_user(
-                    tenant_id, user_id
+                summary["cold_archives_deleted"] = (
+                    await self._cold_archive.delete_cold_archives_for_user(
+                        tenant_id, user_id
+                    )
                 )
             except Exception as e:
                 self._logger.warning("Cold archive purge user failed: %s", e)
@@ -585,6 +1265,47 @@ class MemoryPortAdapter:
                 await self._vector_index.delete_user_messages(tenant_id, user_id)
             except Exception as e:
                 self._logger.warning("Session vector purge user failed: %s", e)
+
+        rag_result = await purge_rag_documents_for_user(
+            self._index_port, self._archive_db, tenant_id, user_id
+        )
+        summary["rag_documents_deleted"] = rag_result.get("deleted", 0)
+        summary["rag_delete_errors"] = rag_result.get("errors", 0)
+        summary["rag_doc_ids"] = rag_result.get("doc_ids", [])
+
+        if self._skill_memory is not None:
+            l3 = await self._skill_memory.purge_l3_for_user_async(
+                tenant_id, user_id
+            )
+            summary.update(l3)
+
+        if self._external is not None:
+            try:
+                summary["external_profile_deleted"] = await self._external.delete_profile(
+                    tenant_id, user_id
+                )
+            except Exception as e:
+                self._logger.warning("External profile purge user failed: %s", e)
+                summary["external_profile_deleted"] = False
+
+        if l4_keys:
+            summary["user_l4_keys_cleared"] = len(l4_keys)
+
+        if self._purge_delete_external_audit:
+            from agent_platform.memory.adapters.compliance_utils import (
+                delete_external_fact_audit_for_user,
+            )
+
+            try:
+                summary["external_audit_deleted"] = (
+                    await delete_external_fact_audit_for_user(
+                        self._archive_db, tenant_id, user_id
+                    )
+                )
+            except Exception as e:
+                self._logger.warning("External audit purge user failed: %s", e)
+                summary["external_audit_deleted"] = 0
+
         ctx = RequestContext(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -593,6 +1314,41 @@ class MemoryPortAdapter:
             channel="system",
         )
         await self._invalidate_session_search_cache(ctx)
+        return summary
+
+    async def backfill_cold_search_index(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
+        if self._cold_archive is None:
+            return {
+                "indexed": 0,
+                "skipped": 0,
+                "errors": 0,
+                "reason": "cold_archive_not_configured",
+            }
+        backfiller = getattr(self._cold_archive, "backfill_search_index", None)
+        if backfiller is None:
+            return {
+                "indexed": 0,
+                "skipped": 0,
+                "errors": 0,
+                "reason": "backfill_not_supported",
+            }
+        return await backfiller(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            limit=limit,
+            force=force,
+            dry_run=dry_run,
+        )
 
     async def archive_expired_sessions(
         self, retention_days: Optional[int] = None
@@ -605,7 +1361,10 @@ class MemoryPortAdapter:
                 "reason": "cold_archive_not_configured",
             }
         days = retention_days if retention_days is not None else self._retention_days
-        if self._vector_index is not None:
+        if (
+            self._vector_index is not None
+            and not self._cold_archive_keep_vectors
+        ):
             try:
                 expired_ids = await self._archive_db.list_expired_session_ids(days)
                 for session_id in expired_ids:
@@ -619,7 +1378,10 @@ class MemoryPortAdapter:
     async def archive_session(self, session_id: str) -> dict:
         if self._cold_archive is None:
             return {"reason": "cold_archive_not_configured"}
-        if self._vector_index is not None:
+        if (
+            self._vector_index is not None
+            and not self._cold_archive_keep_vectors
+        ):
             try:
                 await self._vector_index.delete_session_messages(session_id)
             except Exception as e:
@@ -680,4 +1442,5 @@ class MemoryPortAdapter:
             "cold_archive": (
                 "configured" if self._cold_archive else "not_configured"
             ),
+            "cold_archive_keep_vectors": self._cold_archive_keep_vectors,
         }

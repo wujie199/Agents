@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 import time
 from typing import Optional, Any, Dict, List, Callable
 import logging
@@ -64,25 +65,40 @@ class ToolPortAdapter:
             )
     
     def _load_builtin_tools(self) -> None:
+        from agent_platform.tools.builtins import json_io, skill_echo
+
+        builtin_handlers = {
+            "skill_echo": skill_echo.skill_echo,
+            "read_json_all_title": json_io.read_json_all_title,
+            "read_json_context_by_title": json_io.read_json_context_by_title,
+            "save_result_2_json": json_io.save_result_2_json,
+        }
+        for name, handler in builtin_handlers.items():
+            self._handlers[name] = handler
+            if name not in self._tools:
+                acl = (
+                    ["user", "cli", "test"]
+                    if name == "skill_echo"
+                    else ["reader", "writer", "user", "cli", "test"]
+                )
+                self._tools[name] = ToolDefinition(
+                    name=name,
+                    acl=acl,
+                    timeout_seconds=30 if name != "skill_echo" else 10,
+                )
+
         try:
-            from tools import read_json_all_title, save_result_2_json
-            from tools import read_json_context_by_title, read_word_2_json
-            
-            self._handlers["read_json_all_title"] = read_json_all_title.read_json_all_title
-            self._handlers["save_result_2_json"] = save_result_2_json.save_result_2_json
-            self._handlers["read_json_context_by_title"] = read_json_context_by_title.read_json_context_by_title
-            self._handlers["read_word_2_json"] = read_word_2_json.read_word_2_json
-            
-            for name in self._handlers:
-                if name not in self._tools:
-                    self._tools[name] = ToolDefinition(
-                        name=name,
-                        acl=["reader", "writer"],
-                        timeout_seconds=30
-                    )
-                    
-        except ImportError as e:
-            self._logger.warning(f"Failed to load builtin tools: {e}")
+            from agent_platform.tools.builtins import word_io
+
+            self._handlers["read_word_2_json"] = word_io.read_word_2_json
+            if "read_word_2_json" not in self._tools:
+                self._tools["read_word_2_json"] = ToolDefinition(
+                    name="read_word_2_json",
+                    acl=["reader", "user", "cli", "test"],
+                    timeout_seconds=60,
+                )
+        except ImportError:
+            pass
     
     def register_tool(
         self,
@@ -177,10 +193,13 @@ class ToolPortAdapter:
         start_time = time.time()
         
         try:
+            call_args = dict(args)
+            if "context" in inspect.signature(handler).parameters:
+                call_args["context"] = context
             if asyncio.iscoroutinefunction(handler):
-                result = await handler(**args)
+                result = await handler(**call_args)
             else:
-                result = handler(**args)
+                result = handler(**call_args)
             
             latency_ms = (time.time() - start_time) * 1000
             self._audit(tool_name, args, result, "success", latency_ms, context)

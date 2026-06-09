@@ -64,6 +64,7 @@ class RAGPortAdapter:
         )
         self._cache_ttl = cache_ttl_seconds or self._config.cache_ttl_seconds
         self._logger = logging.getLogger(__name__)
+        self._cache_stats = {"hit": 0, "miss": 0}
 
     async def _get_embedding(self, text: str) -> List[float]:
         if self._embedding_model is None:
@@ -111,14 +112,20 @@ class RAGPortAdapter:
         if asyncio.iscoroutine(result):
             await result
 
+    def get_cache_stats(self) -> dict[str, int]:
+        return dict(self._cache_stats)
+
     async def _get_from_cache(self, key: str) -> Optional[EvidenceBundle]:
         if not self._enable_cache or self._cache_port is None:
             return None
         try:
             cached = await self._cache_get(key)
             if cached:
+                self._cache_stats["hit"] += 1
                 return bundle_from_cache_dict(cached)
+            self._cache_stats["miss"] += 1
         except Exception as e:
+            self._cache_stats["miss"] += 1
             self._logger.warning("Cache get failed: %s", e)
         return None
 
@@ -166,7 +173,29 @@ class RAGPortAdapter:
         context: RequestContext,
         plan: Optional[Any] = None,
     ) -> EvidenceBundle:
+        def _rag_trace(triggered: bool, reason: str, **extra: Any) -> None:
+            try:
+                from app.agents.memory_runtime_debug import trace_layer_trigger
+
+                trace_layer_trigger(
+                    None,
+                    "RAG",
+                    "route_and_retrieve",
+                    triggered,
+                    reason,
+                    data={
+                        "tenant_id": context.tenant_id,
+                        "query_preview": (query or "")[:80],
+                        "enable_router": self._config.retrieval.enable_router,
+                        **extra,
+                    },
+                    run_id=context.session_id,
+                )
+            except Exception:
+                pass
+
         if self._router is not None and self._config.retrieval.enable_router:
+            _rag_trace(True, "delegated_retrieval_router")
             return await self._router.route_and_retrieve(
                 query,
                 context,
@@ -178,7 +207,9 @@ class RAGPortAdapter:
         cache_key = self._get_cache_key(query, context.tenant_id)
         cached_result = await self._get_from_cache(cache_key)
         if cached_result:
+            _rag_trace(True, "redis_cache_hit", cache_key=cache_key)
             return cached_result
+        _rag_trace(True, "vector_search_start", cache_key=cache_key)
 
         try:
             query_vector = await self._get_embedding(query)

@@ -1,4 +1,10 @@
 # 并发与批处理配置
+chat:
+  enabled: true
+  tenant_requests_per_minute: 60
+  user_requests_per_minute: 20
+  # 分布式限流（可选）：export CHAT_RATE_LIMIT_REDIS_URL=redis://localhost:6379/0
+
 default:
   max_parallel_sends: 5
   max_intra_batch_workers: 3

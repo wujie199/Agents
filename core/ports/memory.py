@@ -44,6 +44,9 @@ class SkillSummary:
     summary: str
     success_rate: float = 1.0
     last_used_at: Optional[str] = None
+    usage_count: int = 0
+    anti_patterns: List[str] = field(default_factory=list)
+    status: str = "active"
 
 
 @dataclass
@@ -62,6 +65,32 @@ class SessionFragment:
     content: str
     ts: str
     score: float = 0.0
+    source: str = "online"
+
+
+@dataclass
+class SessionSearchResult:
+    summary: str
+    fragments: List[SessionFragment] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "summary": self.summary,
+            "sources": self.sources,
+            "fragments": [
+                {
+                    "message_id": f.message_id,
+                    "session_id": f.session_id,
+                    "role": f.role,
+                    "content": f.content,
+                    "ts": f.ts,
+                    "score": f.score,
+                    "source": f.source,
+                }
+                for f in self.fragments
+            ],
+        }
 
 
 class MemoryPort(Protocol):
@@ -139,6 +168,15 @@ class MemoryPort(Protocol):
     ) -> str:
         ...
 
+    async def session_search_detail(
+        self,
+        query: str,
+        context: RequestContext,
+        limit: int = 5,
+        scope: str = "session",
+    ) -> "SessionSearchResult":
+        ...
+
     async def skill_search(
         self,
         query: str,
@@ -156,6 +194,72 @@ class MemoryPort(Protocol):
     ) -> Any:
         ...
 
+    async def list_skills(self, context: RequestContext) -> List[dict]:
+        ...
+
+    async def get_skill(
+        self, skill_id: str, context: RequestContext
+    ) -> Optional[dict]:
+        ...
+
+    async def extract_skill_draft(
+        self,
+        context: RequestContext,
+        title: str,
+        triggers: List[str],
+        steps: List[dict],
+        skill_id: Optional[str] = None,
+    ) -> str:
+        ...
+
+    async def list_skill_drafts(self, context: RequestContext) -> List[dict]:
+        ...
+
+    async def publish_skill(
+        self,
+        context: RequestContext,
+        skill_id: str,
+        *,
+        remove_draft: bool = True,
+    ) -> dict:
+        ...
+
+    async def deprecate_skill(
+        self, context: RequestContext, skill_id: str
+    ) -> dict:
+        ...
+
+    async def activate_skill(
+        self, context: RequestContext, skill_id: str
+    ) -> dict:
+        ...
+
+    async def sync_skills_from(
+        self,
+        source_dir: str,
+        *,
+        remove_missing: bool = False,
+    ) -> dict:
+        ...
+
+    async def list_skill_runs(
+        self,
+        context: RequestContext,
+        *,
+        skill_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[dict]:
+        ...
+
+    async def purge_tenant_l3(
+        self,
+        tenant_id: str,
+        *,
+        delete_runs: bool = True,
+    ) -> dict:
+        ...
+
     async def record_skill_outcome(
         self,
         context: RequestContext,
@@ -168,9 +272,45 @@ class MemoryPort(Protocol):
     ) -> Optional[Any]:
         ...
 
+    async def fetch_profile_facts(
+        self, tenant_id: str, user_id: str
+    ) -> List[dict]:
+        ...
+
+    async def list_profile_users(self, tenant_id: str) -> List[str]:
+        ...
+
+    async def get_profile(self, tenant_id: str, user_id: str) -> dict:
+        ...
+
+    async def import_profile(
+        self, tenant_id: str, user_id: str, profile: dict
+    ) -> None:
+        ...
+
+    async def set_profile_facts(
+        self, tenant_id: str, user_id: str, facts: List[dict]
+    ) -> int:
+        ...
+
+    async def purge_tenant_l4(self, tenant_id: str) -> dict:
+        ...
+
     async def purge_user_data(
         self, tenant_id: str, user_id: str
-    ) -> None:
+    ) -> dict:
+        ...
+
+    async def backfill_cold_search_index(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
         ...
 
     async def purge_expired_sessions(self, retention_days: int = 90) -> int:
@@ -189,6 +329,9 @@ class MemoryPort(Protocol):
     async def archive_expired_sessions(
         self, retention_days: Optional[int] = None
     ) -> dict:
+        ...
+
+    async def archive_session(self, session_id: str) -> dict:
         ...
 
     async def list_cold_archives(

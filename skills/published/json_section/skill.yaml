@@ -1,0 +1,32 @@
+skill_id: json_section
+version: "1.0.0"
+title: JSON 章节读写
+summary: |
+  按标题读取 JSON 章节上下文，并将结果写入 save.json。
+  适用于报告流水线中章节素材的加载与落盘。
+triggers:
+  - json
+  - 章节
+  - section
+  - 读写json
+required_tools:
+  - read_json_context_by_title
+  - save_result_2_json
+max_duration_seconds: 60
+acl:
+  - user
+  - cli
+  - test
+steps:
+  - action: read
+    tool: read_json_context_by_title
+    args_template:
+      title: "$inputs.title"
+      json_path: "data/json/read.json"
+    on_failure: abort
+  - action: save
+    tool: save_result_2_json
+    args_template:
+      payload: "$outputs.read"
+      json_path: "data/json/save.json"
+    on_failure: abort

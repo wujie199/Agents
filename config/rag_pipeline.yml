@@ -18,13 +18,14 @@ embedding_batch_size: 32
 # 适配器 backend 见 document/rag/adapters/registry.py
 embedding:
   backend: local_bge
-  model_path: null
+  # 外置盘未挂载时会提示挂载 /Volumes/wj，不会自动下载
+  model_path: /Volumes/wj/model/embedding/bge-small-zh-v1.5
   device: null
   normalize: true
 
 rerank:
   backend: local_bge
-  model_path: null
+  model_path: /Volumes/wj/model/rerank/bge-reranker-base
   device: null
 
 # 规则/关键词元数据打标（离线建库 step4，规则文件 config/metadata_tagging.yml）
@@ -48,6 +49,16 @@ ingest:
   enable_cleaning: true
   ocr_postprocess: true
   cleaning_level: standard
+  # 本地 Paddle OCR 模型（外置盘 /Volumes/wj；未挂载时会提醒，不会自动下载）
+  ocr_model_root: /Volumes/wj/model/ocr
+  ocr_device: cpu
+  ocr_preprocess: auto
+  ocr_enable_formula: true
+  ocr_formula_model: PP-FormulaNet_plus-S
+  ocr_max_attempts: 3
+  ocr_fast: true
+  ocr_table_e2e: false
+  ocr_enable_mkldnn: true
 
 retrieval:
   primary_backend: vector
@@ -62,8 +73,8 @@ retrieval:
   enable_rerank: true
   rerank_top_n: 5
   rerank_min_score: 0.8
-  use_mock_rerank_fallback: true
-  enable_router: false
+  use_mock_rerank_fallback: true   # 生产见 rag_pipeline.production.example.yml（false）
+  enable_router: true
   auto_route: false
   enable_graph: false
   enable_sql: false

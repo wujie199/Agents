@@ -143,9 +143,93 @@ class PostgreSQLAdapter:
         );
         CREATE INDEX IF NOT EXISTS idx_cold_archive_tenant_user
             ON cold_archive_sessions(tenant_id, user_id);
+
+        CREATE TABLE IF NOT EXISTS cold_archive_search (
+            record_id VARCHAR(64) PRIMARY KEY,
+            session_id VARCHAR(64) NOT NULL,
+            tenant_id VARCHAR(64) NOT NULL,
+            user_id VARCHAR(64) NOT NULL,
+            role VARCHAR(16) NOT NULL,
+            content TEXT NOT NULL,
+            ts TIMESTAMP,
+            record_type VARCHAR(16) DEFAULT 'message'
+        );
+        CREATE INDEX IF NOT EXISTS idx_cas_session ON cold_archive_search(session_id);
+        CREATE INDEX IF NOT EXISTS idx_cas_tenant_user
+            ON cold_archive_search(tenant_id, user_id);
+        CREATE INDEX IF NOT EXISTS idx_cas_content_fts
+            ON cold_archive_search
+            USING gin (to_tsvector('simple', coalesce(content, '')));
+
+        CREATE TABLE IF NOT EXISTS compliance_audit_log (
+            id SERIAL PRIMARY KEY,
+            tenant_id VARCHAR(64) NOT NULL,
+            user_id VARCHAR(64) NOT NULL,
+            resource_type VARCHAR(32) NOT NULL,
+            resource_id VARCHAR(64) NOT NULL,
+            content_hash VARCHAR(128) NOT NULL,
+            action VARCHAR(32) NOT NULL,
+            ts TIMESTAMP NOT NULL,
+            meta_json JSONB
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_tenant_user
+            ON compliance_audit_log(tenant_id, user_id);
+
+        CREATE TABLE IF NOT EXISTS graph_checkpoints (
+            checkpoint_id VARCHAR(64) PRIMARY KEY,
+            thread_id VARCHAR(128) NOT NULL,
+            tenant_id VARCHAR(64) NOT NULL,
+            session_id VARCHAR(128),
+            checkpoint_ns VARCHAR(64) DEFAULT '',
+            parent_id VARCHAR(64),
+            state_json JSONB NOT NULL,
+            metadata_json JSONB,
+            created_at TIMESTAMP NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gc_thread
+            ON graph_checkpoints(thread_id, tenant_id);
+
+        CREATE TABLE IF NOT EXISTS skill_runs (
+            run_id VARCHAR(64) PRIMARY KEY,
+            skill_id VARCHAR(128) NOT NULL,
+            tenant_id VARCHAR(64) NOT NULL,
+            user_id VARCHAR(64) NOT NULL,
+            session_id VARCHAR(128),
+            trace_id VARCHAR(64),
+            success INTEGER NOT NULL DEFAULT 0,
+            steps_executed INTEGER DEFAULT 0,
+            error TEXT,
+            inputs_json TEXT,
+            outputs_json TEXT,
+            ts TIMESTAMP NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_runs_tenant_user
+            ON skill_runs(tenant_id, user_id);
+        CREATE INDEX IF NOT EXISTS idx_skill_runs_skill
+            ON skill_runs(skill_id);
+
+        CREATE TABLE IF NOT EXISTS hot_memory_docs (
+            tenant_id VARCHAR(64) NOT NULL,
+            doc_kind VARCHAR(32) NOT NULL,
+            user_id VARCHAR(64) NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (tenant_id, doc_kind, user_id)
+        );
         """
         
         await self.execute(create_tables_sql)
+        await self._migrate_schema()
+    
+    async def _migrate_schema(self) -> None:
+        for stmt in (
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS content_hash VARCHAR(128)",
+            "ALTER TABLE tool_calls ADD COLUMN IF NOT EXISTS result_hash VARCHAR(128)",
+        ):
+            try:
+                await self.execute(stmt)
+            except Exception:
+                pass
     
     def _check_circuit_breaker(self) -> bool:
         if not self._enable_cb:
@@ -563,6 +647,58 @@ class PostgreSQLAdapter:
             session_id, user_id, tenant_id, query, limit
         )
 
+    async def search_tool_calls(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict]:
+        if not query:
+            return []
+        tokens = [t for t in query.split() if t]
+        params: List[Any] = []
+        idx = 1
+        token_parts = []
+        for token in tokens:
+            token_parts.append(
+                f"(t.result_summary ILIKE ${idx} OR t.tool_name ILIKE ${idx})"
+            )
+            params.append(f"%{token}%")
+            idx += 1
+        conditions = []
+        if token_parts:
+            conditions.append(f"({' AND '.join(token_parts)})")
+        if session_id:
+            conditions.append(f"t.session_id = ${idx}")
+            params.append(session_id)
+            idx += 1
+        if user_id:
+            conditions.append(f"s.user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        if tenant_id:
+            conditions.append(f"s.tenant_id = ${idx}")
+            params.append(tenant_id)
+            idx += 1
+
+        where = " AND ".join(conditions)
+        params.append(limit)
+        sql = f"""
+            SELECT t.call_id AS message_id, t.session_id, 'tool' AS role,
+                   (t.tool_name || ': ' || COALESCE(t.result_summary, '')) AS content,
+                   t.ts, s.tenant_id, s.user_id
+            FROM tool_calls t
+            JOIN sessions s ON t.session_id = s.session_id
+            WHERE {where}
+            ORDER BY t.ts DESC
+            LIMIT ${idx}
+        """
+        async with self._get_connection() as conn:
+            rows = await conn.fetch(sql, *params)
+            return [dict(row) for row in rows]
+
     async def list_messages_for_reindex(
         self,
         *,
@@ -611,7 +747,14 @@ class PostgreSQLAdapter:
         cutoff = datetime.now() - timedelta(days=retention_days)
         async with self._get_connection() as conn:
             rows = await conn.fetch(
-                "SELECT session_id FROM sessions WHERE started_at < $1",
+                """
+                SELECT session_id FROM sessions
+                WHERE status != 'active'
+                  AND (
+                    (ended_at IS NOT NULL AND ended_at < $1)
+                    OR (ended_at IS NULL AND started_at < $1)
+                  )
+                """,
                 cutoff,
             )
             return [row["session_id"] for row in rows]
@@ -620,25 +763,32 @@ class PostgreSQLAdapter:
         from datetime import timedelta
 
         cutoff = datetime.now() - timedelta(days=retention_days)
+        expired_subquery = """
+            SELECT session_id FROM sessions
+            WHERE status != 'active'
+              AND (
+                (ended_at IS NOT NULL AND ended_at < $1)
+                OR (ended_at IS NULL AND started_at < $1)
+              )
+        """
         async with self._get_connection() as conn:
             msg_result = await conn.execute(
-                """
-                DELETE FROM messages WHERE session_id IN (
-                    SELECT session_id FROM sessions WHERE started_at < $1
-                )
-                """,
+                f"DELETE FROM messages WHERE session_id IN ({expired_subquery})",
                 cutoff,
             )
             await conn.execute(
-                """
-                DELETE FROM tool_calls WHERE session_id IN (
-                    SELECT session_id FROM sessions WHERE started_at < $1
-                )
-                """,
+                f"DELETE FROM tool_calls WHERE session_id IN ({expired_subquery})",
                 cutoff,
             )
             sess_result = await conn.execute(
-                "DELETE FROM sessions WHERE started_at < $1",
+                f"""
+                DELETE FROM sessions
+                WHERE status != 'active'
+                  AND (
+                    (ended_at IS NOT NULL AND ended_at < $1)
+                    OR (ended_at IS NULL AND started_at < $1)
+                  )
+                """,
                 cutoff,
             )
         msg_count = int(msg_result.split()[-1]) if msg_result else 0
@@ -646,30 +796,157 @@ class PostgreSQLAdapter:
         return msg_count + sess_count
 
     async def anonymize_user_data(self, tenant_id: str, user_id: str) -> int:
+        from agent_platform.memory.adapters.compliance_utils import (
+            append_audit_log,
+            content_sha256,
+            record_message_audit_before_redact,
+        )
+
+        count = 0
         async with self._get_connection() as conn:
-            result = await conn.execute(
+            msg_rows = await conn.fetch(
                 """
-                UPDATE messages SET content = '[redacted]', redacted = TRUE
-                WHERE session_id IN (
-                    SELECT session_id FROM sessions
-                    WHERE tenant_id = $1 AND user_id = $2
-                )
+                SELECT m.message_id, m.session_id, m.content
+                FROM messages m
+                JOIN sessions s ON m.session_id = s.session_id
+                WHERE s.tenant_id = $1 AND s.user_id = $2
+                  AND (m.redacted IS NULL OR m.redacted = FALSE)
+                  AND m.content IS NOT NULL AND m.content <> '[redacted]'
                 """,
                 tenant_id,
                 user_id,
             )
-            await conn.execute(
+            msg_list = [dict(r) for r in msg_rows]
+            await record_message_audit_before_redact(
+                self, tenant_id, user_id, msg_list
+            )
+            for row in msg_list:
+                digest = content_sha256(str(row.get("content") or ""))
+                res = await conn.execute(
+                    """
+                    UPDATE messages
+                    SET content = '[redacted]', redacted = TRUE, content_hash = $1
+                    WHERE message_id = $2
+                    """,
+                    digest,
+                    row["message_id"],
+                )
+                count += int(res.split()[-1]) if res else 0
+
+            tool_rows = await conn.fetch(
                 """
-                UPDATE tool_calls SET result_summary = '[redacted]'
+                SELECT call_id, session_id, result_summary
+                FROM tool_calls
                 WHERE session_id IN (
                     SELECT session_id FROM sessions
                     WHERE tenant_id = $1 AND user_id = $2
                 )
+                  AND result_summary IS NOT NULL
+                  AND result_summary <> '[redacted]'
                 """,
                 tenant_id,
                 user_id,
             )
-        return int(result.split()[-1]) if result else 0
+            for row in tool_rows:
+                digest = content_sha256(str(row["result_summary"] or ""))
+                await append_audit_log(
+                    self,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    resource_type="tool_call",
+                    resource_id=str(row["call_id"]),
+                    content_hash=digest,
+                    action="anonymize",
+                    meta={"session_id": row["session_id"]},
+                )
+                await conn.execute(
+                    """
+                    UPDATE tool_calls
+                    SET result_summary = '[redacted]', result_hash = $1
+                    WHERE call_id = $2
+                    """,
+                    digest,
+                    row["call_id"],
+                )
+        return count
+
+    async def insert_compliance_audit_log(self, data: dict) -> str:
+        columns = [k for k in data.keys() if k != "id"]
+        placeholders = [f"${i + 1}" for i in range(len(columns))]
+        query = f"""
+            INSERT INTO compliance_audit_log ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            RETURNING id
+        """
+        async with self._get_connection() as conn:
+            row_id = await conn.fetchval(query, *[data[c] for c in columns])
+            return str(row_id)
+
+    async def delete_compliance_audit_logs(
+        self,
+        *,
+        tenant_id: str,
+        user_id: Optional[str] = None,
+        resource_type: Optional[str] = None,
+    ) -> int:
+        conditions = ["tenant_id = $1"]
+        params: List[Any] = [tenant_id]
+        idx = 2
+        if user_id:
+            conditions.append(f"user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        if resource_type:
+            conditions.append(f"resource_type = ${idx}")
+            params.append(resource_type)
+        sql = f"DELETE FROM compliance_audit_log WHERE {' AND '.join(conditions)}"
+        async with self._get_connection() as conn:
+            result = await conn.execute(sql, *params)
+            try:
+                return int(str(result).split()[-1])
+            except (ValueError, IndexError):
+                return 0
+
+    async def list_cold_archive_sessions(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict]:
+        conditions: List[str] = []
+        params: List[Any] = []
+        idx = 1
+        if tenant_id:
+            conditions.append(f"tenant_id = ${idx}")
+            params.append(tenant_id)
+            idx += 1
+        if user_id:
+            conditions.append(f"user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.extend([limit, offset])
+        sql = f"""
+            SELECT session_id, tenant_id, user_id, object_key, checksum, archived_at
+            FROM cold_archive_sessions{where}
+            ORDER BY archived_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+        async with self._get_connection() as conn:
+            rows = await conn.fetch(sql, *params)
+            return [dict(r) for r in rows]
+
+    async def count_cold_archive_search_rows(self, session_id: str) -> int:
+        async with self._get_connection() as conn:
+            return int(
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM cold_archive_search WHERE session_id = $1",
+                    session_id,
+                )
+                or 0
+            )
 
     async def insert_cold_archive_index(self, data: dict) -> str:
         columns = list(data.keys())
@@ -734,7 +1011,114 @@ class PostgreSQLAdapter:
         )
 
     async def delete_cold_archive_index(self, session_id: str) -> int:
+        await self.delete_cold_archive_search(session_id)
         return await self.delete("cold_archive_sessions", {"session_id": session_id})
+
+    async def insert_cold_archive_search_rows(self, rows: List[Dict]) -> int:
+        if not rows:
+            return 0
+        async with self._get_connection() as conn:
+            for row in rows:
+                await conn.execute(
+                    """
+                    INSERT INTO cold_archive_search
+                    (record_id, session_id, tenant_id, user_id, role, content, ts, record_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (record_id) DO UPDATE SET
+                        session_id = EXCLUDED.session_id,
+                        tenant_id = EXCLUDED.tenant_id,
+                        user_id = EXCLUDED.user_id,
+                        role = EXCLUDED.role,
+                        content = EXCLUDED.content,
+                        ts = EXCLUDED.ts,
+                        record_type = EXCLUDED.record_type
+                    """,
+                    row["record_id"],
+                    row["session_id"],
+                    row["tenant_id"],
+                    row["user_id"],
+                    row["role"],
+                    row["content"],
+                    row.get("ts"),
+                    row.get("record_type", "message"),
+                )
+        return len(rows)
+
+    async def delete_cold_archive_search(self, session_id: str) -> int:
+        async with self._get_connection() as conn:
+            result = await conn.execute(
+                "DELETE FROM cold_archive_search WHERE session_id = $1",
+                session_id,
+            )
+        return int(result.split()[-1]) if result else 0
+
+    async def delete_cold_archive_search_for_user(
+        self, tenant_id: str, user_id: str
+    ) -> int:
+        async with self._get_connection() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM cold_archive_search
+                WHERE tenant_id = $1 AND user_id = $2
+                """,
+                tenant_id,
+                user_id,
+            )
+        return int(result.split()[-1]) if result else 0
+
+    async def search_cold_archive_messages(
+        self,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+        *,
+        session_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict]:
+        tsquery = self._build_tsquery_terms(query)
+        if not tsquery:
+            return []
+
+        conditions = [
+            "to_tsvector('simple', coalesce(c.content, '')) @@ to_tsquery('simple', $1)",
+            "c.tenant_id = $2",
+            "c.user_id = $3",
+        ]
+        params: List[Any] = [tsquery, tenant_id, user_id]
+        idx = 4
+        if session_id:
+            conditions.append(f"c.session_id = ${idx}")
+            params.append(session_id)
+            idx += 1
+        params.append(limit)
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT c.record_id AS message_id, c.session_id, c.role, c.content, c.ts,
+                   c.record_type,
+                   ts_rank(
+                       to_tsvector('simple', coalesce(c.content, '')),
+                       to_tsquery('simple', $1)
+                   ) AS rank_score
+            FROM cold_archive_search c
+            WHERE {where}
+            ORDER BY rank_score DESC, c.ts DESC
+            LIMIT ${idx}
+        """
+        async with self._get_connection() as conn:
+            rows = await conn.fetch(sql, *params)
+
+        return [
+            {
+                "message_id": row["message_id"],
+                "session_id": row["session_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "ts": str(row["ts"]) if row["ts"] is not None else "",
+                "score": float(row["rank_score"] or 0.0),
+                "source": "cold",
+            }
+            for row in rows
+        ]
 
     async def delete_online_session(self, session_id: str) -> None:
         async with self._get_connection() as conn:
@@ -750,6 +1134,141 @@ class PostgreSQLAdapter:
                 "DELETE FROM sessions WHERE session_id = $1",
                 session_id,
             )
+
+    async def insert_skill_run(self, data: dict) -> str:
+        return await self.insert("skill_runs", data)
+
+    async def delete_skill_runs_for_user(self, tenant_id: str, user_id: str) -> int:
+        async with self._get_connection() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM skill_runs
+                WHERE tenant_id = $1 AND user_id = $2
+                """,
+                tenant_id,
+                user_id,
+            )
+        return int(result.split()[-1]) if result else 0
+
+    async def delete_skill_runs_for_tenant(self, tenant_id: str) -> int:
+        async with self._get_connection() as conn:
+            result = await conn.execute(
+                "DELETE FROM skill_runs WHERE tenant_id = $1",
+                tenant_id,
+            )
+        return int(result.split()[-1]) if result else 0
+
+    async def list_skill_runs(
+        self,
+        *,
+        tenant_id: str,
+        user_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict]:
+        clauses = ["tenant_id = $1"]
+        params: list = [tenant_id]
+        idx = 2
+        if user_id:
+            clauses.append(f"user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        if skill_id:
+            clauses.append(f"skill_id = ${idx}")
+            params.append(skill_id)
+            idx += 1
+        params.extend([limit, offset])
+        sql = f"""
+            SELECT run_id, skill_id, tenant_id, user_id, session_id,
+                   trace_id, success, steps_executed, error, ts
+            FROM skill_runs
+            WHERE {' AND '.join(clauses)}
+            ORDER BY ts DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+        async with self._get_connection() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [
+            {
+                "run_id": row["run_id"],
+                "skill_id": row["skill_id"],
+                "tenant_id": row["tenant_id"],
+                "user_id": row["user_id"],
+                "session_id": row["session_id"],
+                "trace_id": row["trace_id"],
+                "success": row["success"],
+                "steps_executed": row["steps_executed"],
+                "error": row["error"],
+                "ts": str(row["ts"]) if row["ts"] is not None else "",
+            }
+            for row in rows
+        ]
+
+    async def get_hot_memory_doc(
+        self, tenant_id: str, doc_kind: str, user_id: str = ""
+    ) -> Optional[str]:
+        row = await self.select_one(
+            "hot_memory_docs",
+            ["content"],
+            {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": user_id or ""},
+        )
+        return (row or {}).get("content")
+
+    async def upsert_hot_memory_doc(
+        self,
+        tenant_id: str,
+        doc_kind: str,
+        content: str,
+        *,
+        user_id: str = "",
+    ) -> None:
+        from datetime import datetime
+
+        uid = user_id or ""
+        ts = datetime.now().isoformat()
+        existing = await self.select_one(
+            "hot_memory_docs",
+            ["tenant_id"],
+            {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": uid},
+        )
+        if existing:
+            await self.update(
+                "hot_memory_docs",
+                {"content": content, "updated_at": ts},
+                {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": uid},
+            )
+        else:
+            await self.insert(
+                "hot_memory_docs",
+                {
+                    "tenant_id": tenant_id,
+                    "doc_kind": doc_kind,
+                    "user_id": uid,
+                    "content": content,
+                    "updated_at": ts,
+                },
+            )
+
+    async def delete_hot_memory_doc(
+        self, tenant_id: str, doc_kind: str, user_id: str = ""
+    ) -> None:
+        await self.delete(
+            "hot_memory_docs",
+            {
+                "tenant_id": tenant_id,
+                "doc_kind": doc_kind,
+                "user_id": user_id or "",
+            },
+        )
+
+    async def list_hot_memory_user_ids(self, tenant_id: str) -> List[str]:
+        rows = await self.select_many(
+            "hot_memory_docs",
+            ["user_id"],
+            where={"tenant_id": tenant_id, "doc_kind": "user"},
+        )
+        return sorted({r["user_id"] for r in rows if r.get("user_id")})
 
     async def health(self) -> Dict[str, Any]:
         return await self.health_check()

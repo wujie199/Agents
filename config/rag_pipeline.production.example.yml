@@ -1,0 +1,53 @@
+# RAG 生产配置示例
+# 用法: export RAG_PIPELINE_CONFIG=config/rag_pipeline.production.example.yml
+
+collection_name: agent
+enable_vector_index: true
+enable_graph_index: false
+
+chunk_size: 800
+chunk_overlap: 0
+chunk_strategy: faq
+default_top_k: 10
+rerank_top_n: 5
+enable_cache: true
+cache_ttl_seconds: 900
+model_version: bge-small-zh-v1.5-local
+embedding_batch_size: 32
+
+embedding:
+  backend: local_bge
+  # 生产通过环境变量覆盖: RAG_EMBEDDING_MODEL_PATH
+  model_path: /opt/models/embedding/bge-small-zh-v1.5
+  normalize: true
+
+rerank:
+  backend: local_bge
+  model_path: /opt/models/rerank/bge-reranker-base
+
+metadata:
+  enabled: true
+  backend: rule_keyword
+
+ingest:
+  mode: ocr_only
+  routing: simplified
+  ocr_model_root: /opt/models/ocr
+  ocr_device: cpu
+
+retrieval:
+  primary_backend: vector
+  enable_hybrid: true
+  enable_vector_search: true
+  enable_bm25_search: true
+  enable_rerank: true
+  enable_router: true
+  auto_route: true
+  use_mock_rerank_fallback: false
+  enable_graph: false
+  enable_sql: false
+  rerank_min_score: 0.35
+
+rewrite:
+  enable_hyde: false
+  enable_multi_query: false

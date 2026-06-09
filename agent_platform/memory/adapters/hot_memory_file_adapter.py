@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 from core.domain.context import RequestContext
 from core.ports.memory import MemoryDelta, PromptMemorySnapshot
 
+from agent_platform.memory.adapters.file_lock import file_lock
+
 
 class HotMemoryFileAdapter:
     """L1 热记忆：Markdown 文件 + 进程内缓存。"""
@@ -16,11 +18,14 @@ class HotMemoryFileAdapter:
         store_dir: str = "workspace/memory",
         hot_memory_max_chars: int = 2200,
         user_memory_max_chars: int = 1375,
+        *,
+        use_file_lock: bool = True,
     ):
         self._store_dir = Path(store_dir)
         self._store_dir.mkdir(parents=True, exist_ok=True)
         self._hot_memory_max = hot_memory_max_chars
         self._user_memory_max = user_memory_max_chars
+        self._use_file_lock = use_file_lock
         self._logger = logging.getLogger(__name__)
 
         self._memory_cache: Dict[str, str] = {}
@@ -46,7 +51,11 @@ class HotMemoryFileAdapter:
         if tenant_id in self._memory_cache:
             return self._memory_cache[tenant_id]
         path = self._memory_path(tenant_id)
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        if self._use_file_lock:
+            with file_lock(path, exclusive=False):
+                content = path.read_text(encoding="utf-8") if path.exists() else ""
+        else:
+            content = path.read_text(encoding="utf-8") if path.exists() else ""
         self._memory_cache[tenant_id] = content
         return content
 
@@ -55,24 +64,36 @@ class HotMemoryFileAdapter:
         if cache_key in self._user_cache:
             return self._user_cache[cache_key]
         path = self._user_path(tenant_id, user_id)
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        if self._use_file_lock:
+            with file_lock(path, exclusive=False):
+                content = path.read_text(encoding="utf-8") if path.exists() else ""
+        else:
+            content = path.read_text(encoding="utf-8") if path.exists() else ""
         self._user_cache[cache_key] = content
         return content
 
     @staticmethod
-    def _atomic_write(path: Path, content: str) -> None:
+    def _atomic_write(path: Path, content: str, *, use_file_lock: bool = True) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+
+        def _write() -> None:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+
+        if use_file_lock:
+            with file_lock(path, exclusive=True):
+                _write()
+        else:
+            _write()
 
     def _save_memory(self, tenant_id: str, content: str) -> None:
         path = self._memory_path(tenant_id)
-        self._atomic_write(path, content)
+        self._atomic_write(path, content, use_file_lock=self._use_file_lock)
         self._memory_cache[tenant_id] = content
 
     def _save_user(self, tenant_id: str, user_id: str, content: str) -> None:
         path = self._user_path(tenant_id, user_id)
-        self._atomic_write(path, content)
+        self._atomic_write(path, content, use_file_lock=self._use_file_lock)
         self._user_cache[f"{tenant_id}:{user_id}"] = content
 
     @staticmethod
@@ -110,24 +131,161 @@ class HotMemoryFileAdapter:
             frozen=True,
         )
 
+    @staticmethod
+    def _parse_kv_line(line: str) -> Optional[tuple[str, str]]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            return None
+        if ": " not in stripped:
+            return None
+        key, value = stripped.split(": ", 1)
+        if not key.strip():
+            return None
+        return key.strip(), value.strip()
+
+    @staticmethod
+    def _apply_kv_updates(
+        content: str,
+        updates: dict[str, str],
+        sources: Optional[dict[str, str]] = None,
+    ) -> tuple[str, List[dict]]:
+        """Upsert USER 中的 KV 行，保留自由文本与非 KV 行，去除重复 key。"""
+        sources = sources or {}
+        lines = (content or "").splitlines()
+        new_lines: List[str] = []
+        seen_keys: set[str] = set()
+        old_values: dict[str, str] = {}
+
+        for line in lines:
+            parsed = HotMemoryFileAdapter._parse_kv_line(line)
+            if parsed is None:
+                new_lines.append(line)
+                continue
+            key, value = parsed
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            old_values[key] = value
+            if key in updates:
+                new_lines.append(f"{key}: {updates[key]}")
+            else:
+                new_lines.append(line)
+
+        changes: List[dict] = []
+        for key, new_val in updates.items():
+            old = old_values.get(key)
+            if old == new_val:
+                continue
+            if key not in seen_keys:
+                new_lines.append(f"{key}: {new_val}")
+            changes.append(
+                {
+                    "key": key,
+                    "old": old,
+                    "new": new_val,
+                    "source": sources.get(key, "user"),
+                }
+            )
+        return "\n".join(new_lines), changes
+
+    def _apply_user_kv_updates(
+        self,
+        content: str,
+        updates: dict[str, str],
+        sources: Optional[dict[str, str]] = None,
+    ) -> tuple[str, List[dict]]:
+        return self._apply_kv_updates(content, updates, sources)
+
+    def list_user_ids(self, tenant_id: str) -> List[str]:
+        tenant_dir = self._store_dir / tenant_id
+        if not tenant_dir.is_dir():
+            return []
+        return sorted(
+            path.stem[len("USER_") :]
+            for path in tenant_dir.glob("USER_*.md")
+            if path.stem.startswith("USER_")
+        )
+
+    def strip_user_keys(
+        self, tenant_id: str, user_id: str, keys: List[str]
+    ) -> int:
+        """从 USER 文件移除指定 KV 行，保留自由文本。"""
+        remove = {k for k in keys if k}
+        if not remove:
+            return 0
+        current = self._load_user(tenant_id, user_id)
+        if not current:
+            return 0
+        new_lines: List[str] = []
+        removed = 0
+        seen: set[str] = set()
+        for line in current.splitlines():
+            parsed = self._parse_kv_line(line)
+            if parsed is None:
+                new_lines.append(line)
+                continue
+            key, _ = parsed
+            if key in remove:
+                if key not in seen:
+                    removed += 1
+                seen.add(key)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            new_lines.append(line)
+        if removed:
+            self._save_user(
+                tenant_id,
+                user_id,
+                self.truncate("\n".join(new_lines), self._user_memory_max * 2),
+            )
+        return removed
+
+    def merge_user_facts_upsert(
+        self,
+        tenant_id: str,
+        user_id: str,
+        deltas: List[MemoryDelta],
+    ) -> List[dict]:
+        """L4 合并：同 key 覆盖（L4 优先），保留自由文本，返回变更列表供审计。"""
+        if not deltas:
+            return []
+        current = self._load_user(tenant_id, user_id)
+        updates = {delta.key: delta.value for delta in deltas}
+        sources = {delta.key: delta.source for delta in deltas}
+        new_content, changes = self._apply_user_kv_updates(
+            current, updates, sources
+        )
+        if not changes:
+            return changes
+        updated = self.truncate(new_content, self._user_memory_max * 2)
+        self._save_user(tenant_id, user_id, updated)
+        return changes
+
     def apply_delta(
         self,
         tenant_id: str,
         user_id: str,
         delta: MemoryDelta,
     ) -> None:
-        line = f"{delta.key}: {delta.value}"
         if delta.source == "memory":
             current = self._load_memory(tenant_id)
-            updated = self.truncate(
-                f"{current}\n\n{line}".strip(), self._hot_memory_max * 2
+            new_content, _ = self._apply_kv_updates(
+                current,
+                {delta.key: delta.value},
+                {delta.key: delta.source},
             )
+            updated = self.truncate(new_content, self._hot_memory_max * 2)
             self._save_memory(tenant_id, updated)
-        elif delta.source == "user":
+        elif delta.source in ("user", "external"):
             current = self._load_user(tenant_id, user_id)
-            updated = self.truncate(
-                f"{current}\n\n{line}".strip(), self._user_memory_max * 2
+            new_content, _ = self._apply_user_kv_updates(
+                current,
+                {delta.key: delta.value},
+                {delta.key: delta.source},
             )
+            updated = self.truncate(new_content, self._user_memory_max * 2)
             self._save_user(tenant_id, user_id, updated)
         else:
             self._logger.warning("Unknown memory source: %s", delta.source)

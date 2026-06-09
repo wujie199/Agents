@@ -111,10 +111,20 @@ def build_ingest(cfg: Optional[RagPipelineConfig] = None) -> IngestPort:
             OcrProcessorIngestAdapter,
         )
 
+        ing = pipeline_cfg.ingest
         return OcrProcessorIngestAdapter(
-            pdf_dpi=pipeline_cfg.ingest.pdf_dpi,
-            use_layout=pipeline_cfg.ingest.ocr_use_layout,
-            word_to_pdf=pipeline_cfg.ingest.word_to_pdf,
+            pdf_dpi=ing.pdf_dpi,
+            use_layout=ing.ocr_use_layout,
+            word_to_pdf=ing.word_to_pdf,
+            model_root=ing.ocr_model_root,
+            device=ing.ocr_device,
+            preprocess_mode=ing.ocr_preprocess,
+            enable_formula=ing.ocr_enable_formula,
+            formula_model_name=ing.ocr_formula_model,
+            max_attempts=ing.ocr_max_attempts,
+            fast_mode=ing.ocr_fast,
+            table_e2e=ing.ocr_table_e2e,
+            enable_mkldnn=ing.ocr_enable_mkldnn,
         )
 
     from document.rag.application.ingest.factory import build_routed_ingest

@@ -1,0 +1,23 @@
+skill_id: list_json_titles
+version: "1.0.0"
+title: 列出 JSON 章节标题
+summary: |
+  读取 data/json/read.json 并返回全部章节标题列表。
+  常与 json_section 配合：先 list 再按 title 读取章节。
+triggers:
+  - json标题
+  - 章节列表
+  - list json
+required_tools:
+  - read_json_all_title
+max_duration_seconds: 30
+acl:
+  - user
+  - cli
+  - test
+steps:
+  - action: list
+    tool: read_json_all_title
+    args_template:
+      json_path: "data/json/read.json"
+    on_failure: abort

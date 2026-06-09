@@ -40,3 +40,38 @@ python document/query_memory.py --cold-archive cold-fetch \
 ## 合规
 
 `purge_user_data` 会同时删除该用户的冷归档对象与索引行。
+
+## 检索
+
+`session_search` 在线库无结果时会 fallback 检索冷归档对象（`session_search_cold_fallback: true`）。
+
+## 生产运维
+
+### Cron（过期冷归档）
+
+```bash
+# 每日 03:00 归档过期会话
+0 3 * * * cd /path/to/Agents && python scripts/memory_archive_cron.py --cold-archive --days 90 --pg
+
+# 每周补建冷归档 DB 检索索引（归档后历史数据）
+0 4 * * 0 cd /path/to/Agents && python scripts/memory_archive_cron.py \
+  --cold-archive --backfill-cold-search --tenant YOUR_TENANT --pg
+```
+
+### 历史数据 backfill
+
+```bash
+# 冷搜索索引 + 向量 reindex 一次完成（需 --cold-archive --vector）
+python document/query_memory.py --cold-archive --vector backfill-all \
+  --tenant t1 [--user u1] [--dry-run]
+
+# 分项
+python document/query_memory.py --cold-archive backfill-cold-search --tenant t1
+python document/query_memory.py --vector reindex --tenant t1
+```
+
+生产配置见 `config/memory.production.example.yml`（PG、`enable_cold_archive: true`、`enable_session_vector_index: true`）。
+
+## Checkpointer
+
+图状态快照与 L2 分工见 `document/memory/CHECKPOINTER.md`。

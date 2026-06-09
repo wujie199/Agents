@@ -1,0 +1,33 @@
+skill_id: report_context
+version: "1.0.0"
+title: 报告上下文检索
+summary: |
+  组合 L3 程序性记忆：先检索相关 skill，再读取 JSON 章节素材。
+  适用于报告撰写前收集上下文（session + 结构化章节）。
+triggers:
+  - 报告上下文
+  - 报告素材
+  - report context
+trigger_regex:
+  - "报告.*上下文"
+required_tools:
+  - skill_search
+  - read_json_context_by_title
+max_duration_seconds: 90
+acl:
+  - user
+  - cli
+  - test
+steps:
+  - action: find_skills
+    tool: skill_search
+    args_template:
+      query: "$inputs.query"
+      limit: 3
+    on_failure: skip
+  - action: read_section
+    tool: read_json_context_by_title
+    args_template:
+      title: "$inputs.section_title"
+      json_path: "data/json/read.json"
+    on_failure: abort

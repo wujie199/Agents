@@ -1,89 +1,114 @@
 # 模型配置（企业级）
 # ModelPort Registry 使用此配置
+#
+# 策略：优先使用外置盘 / Ollama / vLLM 上「已有」模型（不下载、不 ollama pull）
+#       无本地可用时 → DashScope qwen3.6-plus（API，不下载权重）
+#
+# 环境变量：LOCAL_LLM_ROOT、LOCAL_LLM_MODEL_PATH、LOCAL_LLM_BASE_URL、
+#           LOCAL_LLM_MODEL、DASHSCOPE_API_KEY
 
-# 模型 Profile（构造参数）
 profiles:
+  local_hf_chat:
+    provider: local_hf
+    model_name: local-hf
+    model_path: /Volumes/wj/model/llm/Qwen3-0.6B
+
+  local_openai_chat:
+    provider: openai
+    model_name: ""
+    model_name_env: LOCAL_LLM_MODEL
+    api_key: ollama
+    api_key_env: LOCAL_LLM_API_KEY
+    base_url: http://127.0.0.1:11434/v1
+    base_url_env: LOCAL_LLM_BASE_URL
+    timeout: 120
+
   dashscope_main:
     provider: dashscope
-    model_name: qwen-max
+    model_name: qwen3.6-plus
     api_key_env: DASHSCOPE_API_KEY
-    timeout: 60
-    
+    timeout: 120
+
   dashscope_router:
     provider: dashscope
-    model_name: qwen3.5-27b
+    model_name: qwen3.6-plus
     api_key_env: DASHSCOPE_API_KEY
-    timeout: 30
-    
+    timeout: 60
+
   dashscope_embedding:
     provider: dashscope
     model_name: text-embedding-v3
     api_key_env: DASHSCOPE_API_KEY
-    
+
   dashscope_rerank:
     provider: dashscope
     model_name: qwen3-vl-rerank
     api_key_env: DASHSCOPE_API_KEY
-    
+
   openai_main:
     provider: openai
     model_name: gpt-4
     api_key_env: OPENAI_API_KEY
     timeout: 60
-    
+
   local_embedding:
     provider: local
     model_name: bge-small-zh-v1.5
-    model_path: document/rag/weights/bge-small-zh-v1.5
+    model_path: /Volumes/wj/model/embedding/bge-small-zh-v1.5
 
-# 角色 Role（业务使用）
 roles:
+  # 优先 Ollama/vLLM（快）→ DashScope API → 本地 HF（慢，兜底）
   main_llm:
-    profile: dashscope_main
+    profile: local_openai_chat
     fallback_chain:
-      - dashscope_router
-      - openai_main
+      - dashscope_main
+      - local_hf_chat
     resilience:
-      max_retries: 3
+      max_retries: 2
       retry_on_status: [502, 503, 504]
       circuit_breaker:
         failure_threshold: 5
         recovery_timeout: 60
-        
+
   router_llm:
-    profile: dashscope_router
+    profile: local_openai_chat
+    fallback_chain:
+      - dashscope_main
+      - local_hf_chat
     resilience:
       max_retries: 2
       circuit_breaker:
         failure_threshold: 3
         recovery_timeout: 30
-        
+
   embedding:
     profile: local_embedding
     cache:
       enabled: true
       ttl_seconds: 86400
-      
+
   rerank:
     profile: dashscope_rerank
 
   memory_summarizer_llm:
-    profile: dashscope_router
+    profile: local_openai_chat
+    fallback_chain:
+      - dashscope_main
+      - local_hf_chat
     resilience:
       max_retries: 2
       circuit_breaker:
         failure_threshold: 3
         recovery_timeout: 30
-    
+
   ocr:
     provider: paddleocr
     fallback_chain:
       - tesseract
 
-# 提供商配置
 providers:
   dashscope:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    
+
   openai:
     base_url: https://api.openai.com/v1

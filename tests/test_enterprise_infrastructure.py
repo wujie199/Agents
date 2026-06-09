@@ -125,7 +125,6 @@ class TestProductionContext:
         
         ctx = build_production_context(
             request,
-            use_memory_cache=True,
             use_memory_graph=True
         )
         
@@ -157,7 +156,6 @@ class TestProductionContext:
         
         ctx = build_production_context(
             request,
-            use_memory_cache=True,
             use_memory_graph=True
         )
         

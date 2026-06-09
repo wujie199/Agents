@@ -43,8 +43,10 @@ class LlmMemorySummarizerAdapter:
                     {
                         "role": "system",
                         "content": (
-                            "Summarize the session fragments relevant to the query. "
-                            "Be concise; preserve names, dates, and decisions."
+                            "根据下方会话片段，用中文简要归纳与查询相关的内容。"
+                            "仅复述片段中已有信息，禁止编造品牌、型号或数据；"
+                            "忽略 assistant 回复中明显不可靠的内容；"
+                            "不要输出 thinking 标签或 JSON。"
                         ),
                     },
                     {
@@ -55,6 +57,11 @@ class LlmMemorySummarizerAdapter:
             )
             text = _extract_llm_text(response)
             if text:
+                from app.agents.text_sanitize import has_model_reasoning, strip_model_reasoning
+
+                text = strip_model_reasoning(text)
+                if has_model_reasoning(text):
+                    return await self._fallback.summarize(fragments, query)
                 if len(text) > self._max_chars:
                     return await self._fallback.summarize([text], query)
                 return text

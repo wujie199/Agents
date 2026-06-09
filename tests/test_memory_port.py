@@ -3,7 +3,9 @@ from datetime import datetime
 from pathlib import Path
 
 from core.domain.context import RequestContext
-from core.ports.memory import MemoryDelta, ToolCallRecord, TurnRecord
+from core.ports.memory import MemoryDelta, SkillOutcome, ToolCallRecord, TurnRecord
+from core.composition.run_context import RunContext
+from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
 from agent_platform.infrastructure.privacy.adapter import PrivacyPortAdapter
 from agent_platform.infrastructure.skills.adapter import SimpleSkillAdapter
 from agent_platform.memory.adapters.file_external_memory_adapter import (
@@ -39,6 +41,11 @@ def _ctx(session_id: str = "sess1", user_id: str = "user1") -> RequestContext:
     )
 
 
+def _skill_run_context(ctx: RequestContext, memory) -> RunContext:
+    tools = ToolPortAdapter(config_path="config/tools.yml")
+    return RunContext(request=ctx, memory=memory, tools=tools)
+
+
 @pytest.fixture
 def tmp_store(tmp_path):
     return str(tmp_path / "memory")
@@ -67,7 +74,11 @@ def external_profiles(tmp_path):
 def memory(tmp_store, tmp_db, external_profiles):
     hot = HotMemoryFileAdapter(store_dir=tmp_store)
     skills = SimpleSkillAdapter(skills_dir="skills/published")
-    skill_memory = SkillMemoryAdapter(skills=skills, drafts_dir=str(Path(tmp_store) / "drafts"))
+    skill_memory = SkillMemoryAdapter(
+        skills=skills,
+        drafts_dir=str(Path(tmp_store) / "drafts"),
+        meta_dir=str(Path(tmp_store) / "meta"),
+    )
     external = FileExternalMemoryAdapter(profiles_dir=external_profiles)
     return MemoryPortAdapter(
         store_dir=tmp_store,
@@ -86,11 +97,15 @@ def memory(tmp_store, tmp_db, external_profiles):
 def memory_with_vector(tmp_store, tmp_db, external_profiles, tmp_path):
     hot = HotMemoryFileAdapter(store_dir=tmp_store)
     skills = SimpleSkillAdapter(skills_dir="skills/published")
-    skill_memory = SkillMemoryAdapter(skills=skills, drafts_dir=str(Path(tmp_store) / "drafts"))
+    skill_memory = SkillMemoryAdapter(
+        skills=skills,
+        drafts_dir=str(Path(tmp_store) / "drafts"),
+        meta_dir=str(Path(tmp_store) / "meta"),
+    )
     external = FileExternalMemoryAdapter(profiles_dir=external_profiles)
     vector_port = ChromaVectorAdapter(persist_directory=str(tmp_path / "chroma"))
     vector_index = SessionMessageVectorIndex(
-        vector_port, MockEmbeddingModel(dimension=64)
+        vector_port, MockEmbeddingModel(dimension=64), index_version="mock:64"
     )
     return MemoryPortAdapter(
         store_dir=tmp_store,
@@ -197,6 +212,23 @@ class TestL2Archive:
         assert rows[0]["content"] == "repeat me"
 
     @pytest.mark.asyncio
+    async def test_session_search_chinese_reorder(self, memory):
+        ctx = _ctx("cjk_search")
+        await memory.persist_turn(
+            ctx,
+            TurnRecord(
+                role="user",
+                content="如何选择扫地机器人",
+                ts=datetime.now().isoformat(),
+            ),
+        )
+        result = await memory.session_search(
+            "扫地机器人如何选择", ctx, limit=3, scope="session"
+        )
+        assert result
+        assert "扫地" in result or "机器人" in result
+
+    @pytest.mark.asyncio
     async def test_session_search_user_scope(self, memory):
         ctx_a = _ctx("sess_a")
         ctx_b = _ctx("sess_b")
@@ -244,7 +276,7 @@ class TestL2Archive:
         )
         await memory.purge_user_data("tenant1", "user1")
         result = await memory.session_search("findme", ctx, limit=3)
-        assert result == "No relevant messages found"
+        assert result == ""
 
     @pytest.mark.asyncio
     async def test_hybrid_vector_search(self, memory_with_vector):
@@ -316,6 +348,70 @@ class TestL3SkillSearch:
         draft_path = Path(tmp_store) / "drafts" / "tenant1" / draft_id / "skill.yaml"
         assert draft_path.exists()
 
+    @pytest.mark.asyncio
+    async def test_list_and_get_skill(self, memory):
+        ctx = _ctx()
+        rows = await memory.list_skills(ctx)
+        assert any(r["skill_id"] == "example" for r in rows)
+        detail = await memory.get_skill("example", ctx)
+        assert detail is not None
+        assert detail["title"]
+        assert detail["steps"]
+
+    @pytest.mark.asyncio
+    async def test_run_skill_with_echo(self, memory):
+        ctx = _ctx()
+        run_ctx = _skill_run_context(ctx, memory)
+        result = await memory.run_skill(
+            "example",
+            {"message": "hello skill"},
+            ctx,
+            run_ctx,
+        )
+        assert result.success
+        assert result.outputs["echo"]["echo"] == "hello skill"
+
+    @pytest.mark.asyncio
+    async def test_record_outcome_writes_meta_not_published_yaml(
+        self, memory, tmp_store
+    ):
+        ctx = _ctx()
+        await memory.record_skill_outcome(
+            ctx,
+            SkillOutcome(skill_id="example", success=False, error="test failure"),
+        )
+        meta_path = Path(tmp_store) / "meta" / "tenant1" / "example.json"
+        assert meta_path.exists()
+        published = Path("skills/published/example/skill.yaml").read_text(
+            encoding="utf-8"
+        )
+        assert "test failure" not in published
+
+    @pytest.mark.asyncio
+    async def test_publish_skill(self, memory, tmp_store, tmp_path):
+        ctx = _ctx()
+        draft_id = await memory.extract_skill_draft(
+            ctx,
+            "发布测试",
+            ["发布"],
+            [
+                {
+                    "action": "echo",
+                    "tool": "skill_echo",
+                    "args_template": {"message": "$inputs.msg"},
+                }
+            ],
+            skill_id="publish_test",
+        )
+        assert draft_id == "publish_test"
+        pub_root = tmp_path / "published"
+        memory._skill_memory._published_dir = pub_root
+        result = await memory.publish_skill(ctx, draft_id)
+        assert result["success"]
+        assert (pub_root / "publish_test" / "skill.yaml").exists()
+        drafts = await memory.list_skill_drafts(ctx)
+        assert not any(d["skill_id"] == draft_id for d in drafts)
+
 
 class TestL4External:
     @pytest.mark.asyncio
@@ -331,14 +427,104 @@ class TestL4External:
         assert entity.canonical_id == "u001"
 
     @pytest.mark.asyncio
-    async def test_purge_user_data(self, memory, tmp_db):
+    async def test_purge_user_data(self, memory, tmp_db, external_profiles):
         ctx = _ctx("purge_me")
         await memory.persist_turn(
             ctx,
             TurnRecord(role="user", content="secret", ts=datetime.now().isoformat()),
         )
-        await memory.purge_user_data("tenant1", "user1")
+        profile_path = Path(external_profiles) / "tenant1" / "user1.yaml"
+        assert profile_path.exists()
+        result = await memory.purge_user_data("tenant1", "user1")
         row = await tmp_db.select_one(
             "messages", ["content"], {"session_id": "purge_me"}
         )
         assert row["content"] == "[redacted]"
+        assert result.get("external_profile_deleted") is True
+        assert not profile_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_session_search_detail_structure(self, memory):
+        ctx = _ctx("detail_sess")
+        await memory.persist_turn(
+            ctx,
+            TurnRecord(
+                role="user",
+                content="Detail search keyword alpha",
+                ts=datetime.now().isoformat(),
+            ),
+        )
+        detail = await memory.session_search_detail(
+            "Detail alpha", ctx, limit=3, scope="session"
+        )
+        assert detail.summary
+        assert detail.fragments
+        assert detail.fragments[0].message_id
+        payload = detail.to_dict()
+        assert "fragments" in payload
+        assert payload["sources"]
+
+    @pytest.mark.asyncio
+    async def test_tool_call_search(self, memory, tmp_db):
+        ctx = _ctx("tool_sess")
+        await memory.ensure_session(ctx)
+        await tmp_db.insert_tool_call(
+            {
+                "call_id": "call1",
+                "session_id": ctx.session_id,
+                "tool_name": "weather_api",
+                "args_hash": "abc",
+                "result_summary": "Beijing sunny 25C",
+                "status": "ok",
+                "latency_ms": 10,
+                "ts": datetime.now().isoformat(),
+            }
+        )
+        detail = await memory.session_search_detail(
+            "weather_api Beijing", ctx, limit=3, scope="session"
+        )
+        assert detail.fragments
+        assert any(f.role == "tool" for f in detail.fragments)
+
+    @pytest.mark.asyncio
+    async def test_tool_call_vector_index(self, memory_with_vector):
+        ctx = _ctx("tool_vec_sess")
+        await memory_with_vector.ensure_session(ctx)
+        await memory_with_vector.persist_tool_call(
+            ctx,
+            ToolCallRecord(
+                tool_name="weather_api",
+                result_summary="Shanghai rainy 18C",
+                status="ok",
+                latency_ms=12,
+            ),
+        )
+        detail = await memory_with_vector.session_search_detail(
+            "rainy Shanghai weather", ctx, limit=3, scope="session"
+        )
+        assert detail.fragments
+        assert any("Shanghai" in f.content or "rainy" in f.content.lower() for f in detail.fragments)
+
+    @pytest.mark.asyncio
+    async def test_vector_index_version_auto_reindex(self, memory_with_vector):
+        ctx = _ctx("vec_version_sess")
+        await memory_with_vector.persist_turn(
+            ctx,
+            TurnRecord(
+                role="user",
+                content="version reindex seed content",
+                ts=datetime.now().isoformat(),
+            ),
+        )
+
+        memory_with_vector._vector_index._vector.set_index_version(
+            memory_with_vector._vector_index._collection, "stale:32"
+        )
+        memory_with_vector._vector_version_checked = False
+
+        await memory_with_vector.session_search_detail(
+            "version reindex seed", ctx, limit=3, scope="session"
+        )
+
+        stored = memory_with_vector._vector_index.get_stored_version()
+        assert stored == memory_with_vector._vector_index.index_version

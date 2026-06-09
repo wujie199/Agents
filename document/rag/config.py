@@ -1,9 +1,12 @@
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from typing import List, Optional
 import yaml
+
+from document.model_mount import warn_if_unmounted
 
 
 @dataclass
@@ -20,6 +23,15 @@ class IngestConfig:
     enable_cleaning: bool = True
     ocr_postprocess: bool = True
     cleaning_level: str = "standard"
+    ocr_model_root: Optional[str] = None
+    ocr_device: str = "cpu"
+    ocr_preprocess: str = "auto"
+    ocr_enable_formula: bool = True
+    ocr_formula_model: Optional[str] = None
+    ocr_max_attempts: int = 3
+    ocr_fast: bool = True
+    ocr_table_e2e: bool = False
+    ocr_enable_mkldnn: bool = True
 
 
 @dataclass
@@ -102,6 +114,32 @@ class RagPipelineConfig:
     rewrite: RewriteConfig = field(default_factory=RewriteConfig)
 
 
+def warn_local_model_paths(cfg: RagPipelineConfig) -> None:
+    """外置盘未挂载时打印提醒（不下载模型）。"""
+    ing = cfg.ingest
+    if ing.ocr_model_root:
+        warn_if_unmounted(
+            ing.ocr_model_root,
+            purpose="OCR 文档摄取",
+            env_hint="OCR_MODEL_ROOT",
+        )
+    if cfg.embedding.backend == "local_bge":
+        path = cfg.embedding.model_path
+        if path:
+            warn_if_unmounted(
+                path,
+                purpose="RAG 向量 embedding",
+                env_hint="embedding.model_path",
+            )
+    rerank_backend = (cfg.rerank.backend or "local_bge").lower()
+    if rerank_backend == "local_bge" and cfg.rerank.model_path:
+        warn_if_unmounted(
+            cfg.rerank.model_path,
+            purpose="RAG 检索 rerank",
+            env_hint="rerank.model_path",
+        )
+
+
 def compute_index_config_hash(cfg: RagPipelineConfig) -> str:
     """索引相关配置指纹，用于 manifest 跳过/失效判断。"""
     payload = {
@@ -116,12 +154,38 @@ def compute_index_config_hash(cfg: RagPipelineConfig) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _apply_rag_env_overrides(cfg: RagPipelineConfig) -> RagPipelineConfig:
+    """环境变量覆盖模型路径（生产 K8s 挂载）。"""
+    emb_path = os.environ.get("RAG_EMBEDDING_MODEL_PATH")
+    if emb_path:
+        cfg.embedding.model_path = emb_path
+    rerank_path = os.environ.get("RAG_RERANK_MODEL_PATH")
+    if rerank_path:
+        cfg.rerank.model_path = rerank_path
+    ocr_root = os.environ.get("OCR_MODEL_ROOT")
+    if ocr_root:
+        cfg.ingest.ocr_model_root = ocr_root
+    if os.environ.get("RAG_USE_MOCK_RERANK_FALLBACK", "").lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        cfg.retrieval.use_mock_rerank_fallback = False
+    if os.environ.get("RAG_ENABLE_ROUTER", "").lower() in ("1", "true", "yes"):
+        cfg.retrieval.enable_router = True
+    return cfg
+
+
 def load_rag_pipeline_config(
     config_path: Optional[str] = None,
     config_dir: str = "config",
 ) -> RagPipelineConfig:
     if config_path is None:
-        config_path = str(Path(config_dir) / "rag_pipeline.yml")
+        env_path = os.environ.get("RAG_PIPELINE_CONFIG")
+        if env_path:
+            config_path = env_path
+        else:
+            config_path = str(Path(config_dir) / "rag_pipeline.yml")
 
     path = Path(config_path)
     if not path.exists():
@@ -147,7 +211,7 @@ def load_rag_pipeline_config(
     if path.name == "rag_pipeline.yml" and not raw.get("collection_name"):
         collection_name = chroma.get("collection_name", collection_name)
 
-    return RagPipelineConfig(
+    cfg = RagPipelineConfig(
         collection_name=collection_name,
         enable_vector_index=raw.get("enable_vector_index", True),
         enable_graph_index=raw.get("enable_graph_index", False),
@@ -191,6 +255,15 @@ def load_rag_pipeline_config(
             enable_cleaning=ingest_raw.get("enable_cleaning", True),
             ocr_postprocess=ingest_raw.get("ocr_postprocess", True),
             cleaning_level=str(ingest_raw.get("cleaning_level", "standard")),
+            ocr_model_root=ingest_raw.get("ocr_model_root"),
+            ocr_device=str(ingest_raw.get("ocr_device", "cpu")),
+            ocr_preprocess=str(ingest_raw.get("ocr_preprocess", "auto")),
+            ocr_enable_formula=bool(ingest_raw.get("ocr_enable_formula", True)),
+            ocr_formula_model=ingest_raw.get("ocr_formula_model"),
+            ocr_max_attempts=int(ingest_raw.get("ocr_max_attempts", 3)),
+            ocr_fast=bool(ingest_raw.get("ocr_fast", True)),
+            ocr_table_e2e=bool(ingest_raw.get("ocr_table_e2e", False)),
+            ocr_enable_mkldnn=bool(ingest_raw.get("ocr_enable_mkldnn", True)),
         ),
         retrieval=RetrievalConfig(
             primary_backend=retrieval_raw.get("primary_backend", "vector"),
@@ -233,3 +306,6 @@ def load_rag_pipeline_config(
             multi_query_count=int(rewrite_raw.get("multi_query_count", 3)),
         ),
     )
+    cfg = _apply_rag_env_overrides(cfg)
+    warn_local_model_paths(cfg)
+    return cfg

@@ -13,6 +13,18 @@ readme = "README.md"
 where = ["."]
 include = ["core*", "document*", "agent_platform*", "app*", "utils*"]
 
+[project.optional-dependencies]
+langgraph = [
+  "langgraph>=0.2",
+  "langchain-core>=0.3",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "langgraph-checkpoint-postgres>=2.0",
+]
+api = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

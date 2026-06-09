@@ -3,8 +3,10 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_MODEL_DIR = (
-    Path(__file__).resolve().parents[2] / "weights" / "bge-reranker-base"
+from document.model_mount import (
+    DEFAULT_RERANK_MODEL,
+    require_mounted_volume,
+    unmounted_reminder,
 )
 
 
@@ -23,12 +25,21 @@ class LocalBgeReranker:
         from sentence_transformers import CrossEncoder
 
         self._model_dir = str(
-            Path(model_dir).resolve() if model_dir else _DEFAULT_MODEL_DIR
+            Path(model_dir).resolve() if model_dir else DEFAULT_RERANK_MODEL
+        )
+        require_mounted_volume(
+            self._model_dir,
+            purpose="RAG 本地 rerank（bge-reranker-base）",
+            env_hint="config/rag_pipeline.yml 的 rerank.model_path",
         )
         if not (Path(self._model_dir) / "config.json").is_file():
             raise FileNotFoundError(
                 f"本地 reranker 目录不完整: {self._model_dir}\n"
-                "请确认存在 config.json 与 model.safetensors（或 pytorch_model.bin）"
+                + unmounted_reminder(
+                    path=self._model_dir,
+                    purpose="RAG rerank 权重缺失",
+                    env_hint="rerank.model_path",
+                )
             )
         kwargs: Dict[str, Any] = {}
         if device is not None:

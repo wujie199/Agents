@@ -72,10 +72,23 @@ python document/query_memory.py session-search \
 
 ## 7. Redis（生产）
 
-`build_production_context` 默认用 Redis 缓存 `session_search` 摘要；开发 CLI 用内存缓存。  
-生产需保证 Redis 可用，否则检索仍可用但无跨实例缓存。
+dev / production **均使用 Redis** 缓存 `session_search` 摘要与 RAG 检索结果；L4 画像缓存前缀 `l4:`。  
+限流默认使用 `REDIS_URL` 的 **db/1**（缓存 db/0），也可用 `CHAT_RATE_LIMIT_REDIS_URL` 单独指定。
 
-## 8. 尚未接入 Agent 时
+```bash
+export REDIS_URL=redis://localhost:6379/0
+# 可选: export CHAT_RATE_LIMIT_REDIS_URL=redis://localhost:6379/1
+```
 
-PG 生产只保证 **L2 归档读写 + CLI**；对话自动 `persist_turn` 仍须后续接 Agent。  
-上线前可用 `session-append` 做冒烟写入。
+`GET /health` 探测 Redis + L2；`GET /ready`（production strict）要求依赖全部 healthy。
+
+## 8. 对话写入
+
+Chat / REPL 已自动 `persist_turn`；上线前仍建议 `session-append` 或一轮对话冒烟。
+
+## 9. Checkpointer 清理
+
+```bash
+python document/query_memory.py checkpoint-purge --days 90
+# 或 cron: python scripts/memory_archive_cron.py --checkpoint-purge
+```

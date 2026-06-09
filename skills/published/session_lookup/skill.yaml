@@ -1,0 +1,28 @@
+skill_id: session_lookup
+version: "1.0.0"
+title: 会话记忆检索
+summary: |
+  在当前用户会话范围内调用 skill_search / session_search 检索历史上下文。
+  适用于需要回忆近期对话或匹配已有技能的场景。
+triggers:
+  - 会话检索
+  - 历史对话
+  - session
+trigger_regex:
+  - "会话.*搜索"
+  - "session.*search"
+required_tools:
+  - session_search
+max_duration_seconds: 60
+acl:
+  - user
+  - cli
+  - test
+steps:
+  - action: search
+    tool: session_search
+    args_template:
+      query: "$inputs.query"
+      limit: 5
+      scope: "session"
+    on_failure: abort

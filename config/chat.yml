@@ -1,0 +1,76 @@
+# 对话 Agent（企业级记忆 Context + Path B 工具）
+# LLM：优先外置盘/Ollama → DashScope qwen3.6-plus（config/models.yml）
+chat:
+  enable_rag: true
+  max_history_turns: 10
+  max_evidence_chars: 6000
+  max_evidence_items: 8
+  rag_min_score: 0.35
+  rag_min_keep: 3
+  model_role: main_llm
+
+  # Context Builder：字符预算 + 滚动摘要 + RAG 门控
+  max_history_chars: 12000
+  recent_turns: 6
+  enable_rag_gating: true
+  rag_gating_min_chars: 4
+  enable_rolling_summary: true
+  rolling_summary_max_chars: 1500
+  use_llm_rolling_summary: true
+  summarizer_role: memory_summarizer_llm
+  session_search_prefetch: true
+  session_search_prefetch_limit: 5
+  session_search_prefetch_max_chars: 2000
+  session_search_prefetch_scope: auto   # auto | session | user
+  # 知识类 L2 预检索用截断拼接（避免 LLM 二次摘要慢且带入历史幻觉）
+  session_search_use_llm_summary: false
+  session_search_llm_on_recall: true
+  skill_prefetch: true
+  l4_profile_prefetch: true
+
+  # 检索编排：回忆类走 L2 session_search，知识类走 RAG，互斥短路
+  retrieval_orchestration: true
+  recall_wins_over_rag: true
+  knowledge_skips_recall: true
+  # 知识类问题同时预检索 L2 会话（与 RAG 并行）
+  knowledge_session_search: true
+  # 知识类问题：仅当 query 命中 L4/profile 模式时预取（非全量注入）
+  l4_prefetch_on_knowledge: true
+  recall_skip_rag_when_prefetch_hit: true
+  # 回忆预检索已跑但未命中时仍跳过 RAG（避免用知识库幻觉补历史）
+  recall_skip_rag_when_prefetch_miss: true
+  # 滚动摘要仅保留 user 发言，降低 assistant 幻觉污染
+  rolling_summary_user_only: true
+  # 有 RAG 证据时强制 grounding
+  evidence_strict_grounding: true
+  # 回忆未命中时提示 Agent 调用 session_search 工具
+  recall_tool_hint_on_miss: true
+  # LLM 意图路由（默认关闭，用正则；开启后用 router_llm）
+  retrieval_llm_router: false
+  retrieval_router_role: router_llm
+  retrieval_router_confidence_min: 0.6
+
+  # 知识/寒暄直连 LLM（证据已在 prepare 注入，无需 ReAct 工具环）
+  knowledge_direct_llm: true
+  # Path B：LangGraph 记忆工具（L1/L2/L3/L4）
+  enable_memory_tools: true
+  enable_skill_tools: true
+  enable_l4_tools: true
+  remember_require_hitl: true
+
+  # 交互场景每轮 flush L2（避免 turn_buffer 延迟）
+  interactive_flush_buffer: true
+
+  # 会话结束 L2→L1 结构化抽取（白名单 key）
+  enable_l1_extract_on_finalize: true
+  use_llm_l1_extract: true
+  l1_extract_max_turns: 20
+  l1_extract_max_items: 5
+  l1_extract_allowed_keys:
+    - 称呼
+    - 姓名
+    - 职业
+    - 语言
+    - 输出格式
+    - 时区
+    - 项目

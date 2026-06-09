@@ -12,7 +12,28 @@ class TestModelRegistry:
     def test_load_config(self):
         registry = ModelRegistry(config_path="config/models.yml")
         assert registry is not None
-    
+
+    def test_main_llm_cloud_fallback_when_no_local(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCAL_LLM_ROOT", str(tmp_path / "none"))
+        monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://127.0.0.1:59999/v1")
+        registry = ModelRegistry(config_path="config/models.yml")
+        role = registry._roles.get("main_llm")
+        assert role is not None
+        assert role.profile == "dashscope_main"
+        assert registry._profiles["dashscope_main"].model_name == "qwen3.6-plus"
+
+    def test_main_llm_local_hf_when_weights_present(self, tmp_path, monkeypatch):
+        root = tmp_path / "llm"
+        model = root / "Qwen3-0.6B"
+        model.mkdir(parents=True)
+        (model / "config.json").write_text("{}", encoding="utf-8")
+        (model / "model.safetensors").write_bytes(b"x")
+        monkeypatch.setenv("LOCAL_LLM_ROOT", str(root))
+        registry = ModelRegistry(config_path="config/models.yml")
+        role = registry._roles.get("main_llm")
+        assert role.profile == "local_hf_chat"
+        assert "dashscope_main" in (role.fallback_chain or [])
+
     def test_get_model_info(self):
         registry = ModelRegistry(config_path="config/models.yml")
         
@@ -111,7 +132,6 @@ class TestFullContext:
         
         ctx = build_production_context(
             request,
-            use_memory_cache=True,
             use_memory_graph=True
         )
         

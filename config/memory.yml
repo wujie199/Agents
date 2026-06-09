@@ -3,10 +3,22 @@ user_memory_max_chars: 1375
 store_dir: data/memory_dev
 skills_dir: skills/published
 skills_drafts_dir: skills/drafts
+skills_meta_dir: skills/meta
+skill_auto_extract_draft: false
+skill_deprecate_threshold: 0.2
+skill_include_deprecated_in_search: false
+skill_auto_extract_min_steps: 2
 external_profiles_dir: data/external_profiles
+external_profiles_backend: file
+external_profile_cache_ttl: 300
+external_profile_cache_backend: redis
+external_merge_on_finalize: true
+purge_delete_external_audit: true
+purge_tenant_l4_strip_user_keys: true
 session_search_max_chars: 2000
 session_search_cache_ttl: 900
 retention_days: 90
+checkpoint_retention_days: 90
 memory_summarizer_role: memory_summarizer_llm
 use_llm_compress: true
 use_llm_summarize: true
@@ -30,3 +42,13 @@ reindex_batch_size: 200
 enable_cold_archive: false
 cold_archive_prefix: l2/cold
 cold_archive_compress: true
+cold_archive_search_scan_limit: 100
+cold_archive_keep_vectors: true
+cold_archive_encrypt_at_rest: false
+session_search_cold_fallback: true
+session_search_rerank: true
+session_vector_auto_reindex_on_version_change: true
+turn_buffer_flush_size: 10
+l1_use_file_lock: true
+l1_store_backend: file
+# 生产见 config/memory.production.example.yml（PG + cold_archive + vector）

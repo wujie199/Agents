@@ -111,7 +111,98 @@ class AsyncSQLiteRelationalAdapter:
                 ON cold_archive_sessions(tenant_id, user_id);
             CREATE INDEX IF NOT EXISTS idx_cold_archive_session
                 ON cold_archive_sessions(session_id);
+
+            CREATE TABLE IF NOT EXISTS cold_archive_search (
+                record_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts TEXT,
+                record_type TEXT DEFAULT 'message'
+            );
+            CREATE INDEX IF NOT EXISTS idx_cas_session
+                ON cold_archive_search(session_id);
+            CREATE INDEX IF NOT EXISTS idx_cas_tenant_user
+                ON cold_archive_search(tenant_id, user_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS cold_archive_fts USING fts5(
+                content,
+                record_id UNINDEXED,
+                session_id UNINDEXED,
+                tenant_id UNINDEXED,
+                user_id UNINDEXED,
+                tokenize='unicode61'
+            );
+
+            CREATE TABLE IF NOT EXISTS compliance_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                action TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                meta_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_tenant_user
+                ON compliance_audit_log(tenant_id, user_id);
+
+            CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                checkpoint_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                session_id TEXT,
+                checkpoint_ns TEXT DEFAULT '',
+                parent_id TEXT,
+                state_json TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_gc_thread
+                ON graph_checkpoints(thread_id, tenant_id);
+
+            CREATE TABLE IF NOT EXISTS skill_runs (
+                run_id TEXT PRIMARY KEY,
+                skill_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT,
+                trace_id TEXT,
+                success INTEGER NOT NULL DEFAULT 0,
+                steps_executed INTEGER DEFAULT 0,
+                error TEXT,
+                inputs_json TEXT,
+                outputs_json TEXT,
+                ts TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_runs_tenant_user
+                ON skill_runs(tenant_id, user_id);
+            CREATE INDEX IF NOT EXISTS idx_skill_runs_skill
+                ON skill_runs(skill_id);
+
+            CREATE TABLE IF NOT EXISTS hot_memory_docs (
+                tenant_id TEXT NOT NULL,
+                doc_kind TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, doc_kind, user_id)
+            );
         """)
+        await self._migrate_schema(conn)
+
+    async def _migrate_schema(self, conn: aiosqlite.Connection) -> None:
+        for stmt in (
+            "ALTER TABLE messages ADD COLUMN content_hash TEXT",
+            "ALTER TABLE tool_calls ADD COLUMN result_hash TEXT",
+        ):
+            try:
+                await conn.execute(stmt)
+            except Exception:
+                pass
     
     @asynccontextmanager
     async def _get_connection(self):
@@ -299,17 +390,11 @@ class AsyncSQLiteRelationalAdapter:
 
     @staticmethod
     def _build_fts_query(query: str) -> str:
-        tokens = [t for t in re.split(r"\s+", query.strip()) if t]
-        if not tokens:
-            return '""'
-        if len(tokens) == 1:
-            cleaned = tokens[0].replace('"', '""')
-            return f'"{cleaned}"'
-        parts = []
-        for token in tokens:
-            cleaned = token.replace('"', '""')
-            parts.append(f'"{cleaned}"')
-        return " OR ".join(parts)
+        from agent_platform.memory.adapters.session_search_terms import (
+            build_fts_match_query,
+        )
+
+        return build_fts_match_query(query)
 
     async def _search_messages_fts(
         self,
@@ -384,9 +469,18 @@ class AsyncSQLiteRelationalAdapter:
         else:
             sql += " AND (redacted IS NULL OR redacted = 0)"
         if query:
+            from agent_platform.memory.adapters.session_search_terms import (
+                extract_search_terms,
+            )
+
             col = "m.content" if "JOIN" in sql else "content"
-            sql += f" AND {col} LIKE :query"
-            params["query"] = f"%{query}%"
+            terms = extract_search_terms(query)
+            ors = []
+            for i, term in enumerate(terms):
+                key = f"qt{i}"
+                ors.append(f"{col} LIKE :{key}")
+                params[key] = f"%{term}%"
+            sql += f" AND ({' OR '.join(ors)})"
 
         sql += " ORDER BY m.ts DESC LIMIT :limit" if "JOIN" in sql else " ORDER BY ts DESC LIMIT :limit"
         params["limit"] = limit
@@ -417,6 +511,53 @@ class AsyncSQLiteRelationalAdapter:
         return await self._search_messages_like(
             session_id, user_id, tenant_id, query, limit
         )
+
+    async def search_tool_calls(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[dict]:
+        if not query:
+            return []
+        tokens = [t for t in query.split() if t]
+        token_conditions = []
+        params: dict = {"limit": limit}
+        for i, token in enumerate(tokens):
+            key = f"p{i}"
+            token_conditions.append(
+                f"(t.result_summary LIKE :{key} OR t.tool_name LIKE :{key})"
+            )
+            params[key] = f"%{token}%"
+        conditions = [f"({' AND '.join(token_conditions)})"] if token_conditions else []
+        if session_id:
+            conditions.append("t.session_id = :session_id")
+            params["session_id"] = session_id
+        if user_id:
+            conditions.append("s.user_id = :user_id")
+            params["user_id"] = user_id
+        if tenant_id:
+            conditions.append("s.tenant_id = :tenant_id")
+            params["tenant_id"] = tenant_id
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT t.call_id AS message_id, t.session_id, 'tool' AS role,
+                   (t.tool_name || ': ' || COALESCE(t.result_summary, '')) AS content,
+                   t.ts, s.tenant_id, s.user_id
+            FROM tool_calls t
+            JOIN sessions s ON t.session_id = s.session_id
+            WHERE {where}
+            ORDER BY t.ts DESC
+            LIMIT :limit
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def list_messages_for_reindex(
         self,
@@ -466,7 +607,14 @@ class AsyncSQLiteRelationalAdapter:
         async with self._get_connection() as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                "SELECT session_id FROM sessions WHERE started_at < :cutoff",
+                """
+                SELECT session_id FROM sessions
+                WHERE status != 'active'
+                  AND (
+                    (ended_at IS NOT NULL AND ended_at < :cutoff)
+                    OR (ended_at IS NULL AND started_at < :cutoff)
+                  )
+                """,
                 {"cutoff": cutoff},
             )
             rows = await cursor.fetchall()
@@ -476,54 +624,81 @@ class AsyncSQLiteRelationalAdapter:
         from datetime import datetime, timedelta
 
         cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        expired_filter = """
+            session_id IN (
+                SELECT session_id FROM sessions
+                WHERE status != 'active'
+                  AND (
+                    (ended_at IS NOT NULL AND ended_at < :cutoff)
+                    OR (ended_at IS NULL AND started_at < :cutoff)
+                  )
+            )
+        """
         async with self._get_connection() as conn:
             cursor = await conn.cursor()
             await cursor.execute(
-                """
-                DELETE FROM messages_fts WHERE session_id IN (
-                    SELECT session_id FROM sessions WHERE started_at < :cutoff
-                )
-                """,
+                f"DELETE FROM messages_fts WHERE {expired_filter}",
                 {"cutoff": cutoff},
             )
             await cursor.execute(
-                """
-                DELETE FROM messages WHERE session_id IN (
-                    SELECT session_id FROM sessions WHERE started_at < :cutoff
-                )
-                """,
+                f"DELETE FROM messages WHERE {expired_filter}",
                 {"cutoff": cutoff},
             )
             msg_count = cursor.rowcount
             await cursor.execute(
-                """
-                DELETE FROM tool_calls WHERE session_id IN (
-                    SELECT session_id FROM sessions WHERE started_at < :cutoff
-                )
-                """,
+                f"DELETE FROM tool_calls WHERE {expired_filter}",
                 {"cutoff": cutoff},
             )
             await cursor.execute(
-                "DELETE FROM sessions WHERE started_at < :cutoff",
+                f"""
+                DELETE FROM sessions
+                WHERE status != 'active'
+                  AND (
+                    (ended_at IS NOT NULL AND ended_at < :cutoff)
+                    OR (ended_at IS NULL AND started_at < :cutoff)
+                  )
+                """,
                 {"cutoff": cutoff},
             )
             session_count = cursor.rowcount
         return int(msg_count or 0) + int(session_count or 0)
 
     async def anonymize_user_data(self, tenant_id: str, user_id: str) -> int:
+        from agent_platform.memory.adapters.compliance_utils import (
+            append_audit_log,
+            content_sha256,
+            record_message_audit_before_redact,
+        )
+
         async with self._get_connection() as conn:
             cursor = await conn.cursor()
             await cursor.execute(
                 """
-                UPDATE messages SET content = '[redacted]', redacted = 1
-                WHERE session_id IN (
-                    SELECT session_id FROM sessions
-                    WHERE tenant_id = :tenant_id AND user_id = :user_id
-                )
+                SELECT m.message_id, m.session_id, m.content
+                FROM messages m
+                JOIN sessions s ON m.session_id = s.session_id
+                WHERE s.tenant_id = :tenant_id AND s.user_id = :user_id
+                  AND (m.redacted IS NULL OR m.redacted = 0)
+                  AND m.content IS NOT NULL AND m.content <> '[redacted]'
                 """,
                 {"tenant_id": tenant_id, "user_id": user_id},
             )
-            count = cursor.rowcount
+            msg_rows = [dict(r) for r in await cursor.fetchall()]
+            await record_message_audit_before_redact(
+                self, tenant_id, user_id, msg_rows
+            )
+            count = 0
+            for row in msg_rows:
+                digest = content_sha256(str(row.get("content") or ""))
+                await cursor.execute(
+                    """
+                    UPDATE messages
+                    SET content = '[redacted]', redacted = 1, content_hash = :digest
+                    WHERE message_id = :message_id
+                    """,
+                    {"digest": digest, "message_id": row["message_id"]},
+                )
+                count += cursor.rowcount
             await cursor.execute(
                 """
                 DELETE FROM messages_fts
@@ -539,15 +714,112 @@ class AsyncSQLiteRelationalAdapter:
             )
             await cursor.execute(
                 """
-                UPDATE tool_calls SET result_summary = '[redacted]'
+                SELECT call_id, session_id, result_summary
+                FROM tool_calls
                 WHERE session_id IN (
                     SELECT session_id FROM sessions
                     WHERE tenant_id = :tenant_id AND user_id = :user_id
                 )
+                  AND result_summary IS NOT NULL
+                  AND result_summary <> '[redacted]'
                 """,
                 {"tenant_id": tenant_id, "user_id": user_id},
             )
+            tool_rows = [dict(r) for r in await cursor.fetchall()]
+            for row in tool_rows:
+                summary = row.get("result_summary") or ""
+                digest = content_sha256(str(summary))
+                await append_audit_log(
+                    self,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    resource_type="tool_call",
+                    resource_id=str(row.get("call_id") or ""),
+                    content_hash=digest,
+                    action="anonymize",
+                    meta={"session_id": row.get("session_id")},
+                )
+                await cursor.execute(
+                    """
+                    UPDATE tool_calls
+                    SET result_summary = '[redacted]', result_hash = :digest
+                    WHERE call_id = :call_id
+                    """,
+                    {"digest": digest, "call_id": row["call_id"]},
+                )
         return int(count or 0)
+
+    async def insert_compliance_audit_log(self, data: dict) -> str:
+        columns = ", ".join(k for k in data.keys() if k != "id")
+        placeholders = ", ".join(f":{k}" for k in data.keys() if k != "id")
+        query = f"""
+            INSERT INTO compliance_audit_log ({columns})
+            VALUES ({placeholders})
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(query, data)
+            return str(cursor.lastrowid)
+
+    async def delete_compliance_audit_logs(
+        self,
+        *,
+        tenant_id: str,
+        user_id: Optional[str] = None,
+        resource_type: Optional[str] = None,
+    ) -> int:
+        conditions = ["tenant_id = :tenant_id"]
+        params: dict = {"tenant_id": tenant_id}
+        if user_id:
+            conditions.append("user_id = :user_id")
+            params["user_id"] = user_id
+        if resource_type:
+            conditions.append("resource_type = :resource_type")
+            params["resource_type"] = resource_type
+        sql = f"DELETE FROM compliance_audit_log WHERE {' AND '.join(conditions)}"
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(sql, params)
+            return int(cursor.rowcount or 0)
+
+    async def list_cold_archive_sessions(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[dict]:
+        conditions: List[str] = []
+        params: dict = {"limit": limit, "offset": offset}
+        if tenant_id:
+            conditions.append("tenant_id = :tenant_id")
+            params["tenant_id"] = tenant_id
+        if user_id:
+            conditions.append("user_id = :user_id")
+            params["user_id"] = user_id
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"""
+            SELECT session_id, tenant_id, user_id, object_key, checksum, archived_at
+            FROM cold_archive_sessions{where}
+            ORDER BY archived_at DESC
+            LIMIT :limit OFFSET :offset
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(sql, params)
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def count_cold_archive_search_rows(self, session_id: str) -> int:
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "SELECT COUNT(*) AS c FROM cold_archive_search WHERE session_id = :session_id",
+                {"session_id": session_id},
+            )
+            row = await cursor.fetchone()
+            return int(dict(row)["c"]) if row else 0
 
     async def insert_cold_archive_index(self, data: dict) -> str:
         columns = ", ".join(data.keys())
@@ -606,6 +878,7 @@ class AsyncSQLiteRelationalAdapter:
         )
 
     async def delete_cold_archive_index(self, session_id: str) -> int:
+        await self.delete_cold_archive_search(session_id)
         async with self._get_connection() as conn:
             cursor = await conn.cursor()
             await cursor.execute(
@@ -613,6 +886,139 @@ class AsyncSQLiteRelationalAdapter:
                 {"session_id": session_id},
             )
             return cursor.rowcount
+
+    async def insert_cold_archive_search_rows(self, rows: List[dict]) -> int:
+        if not rows:
+            return 0
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            for row in rows:
+                await cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO cold_archive_search
+                    (record_id, session_id, tenant_id, user_id, role, content, ts, record_type)
+                    VALUES (:record_id, :session_id, :tenant_id, :user_id, :role, :content, :ts, :record_type)
+                    """,
+                    row,
+                )
+                await cursor.execute(
+                    "DELETE FROM cold_archive_fts WHERE record_id = :record_id",
+                    {"record_id": row["record_id"]},
+                )
+                content = (row.get("content") or "").strip()
+                if content:
+                    await cursor.execute(
+                        """
+                        INSERT INTO cold_archive_fts
+                        (content, record_id, session_id, tenant_id, user_id)
+                        VALUES (:content, :record_id, :session_id, :tenant_id, :user_id)
+                        """,
+                        {
+                            "content": content,
+                            "record_id": row["record_id"],
+                            "session_id": row["session_id"],
+                            "tenant_id": row["tenant_id"],
+                            "user_id": row["user_id"],
+                        },
+                    )
+        return len(rows)
+
+    async def delete_cold_archive_search(self, session_id: str) -> int:
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """
+                DELETE FROM cold_archive_fts WHERE record_id IN (
+                    SELECT record_id FROM cold_archive_search WHERE session_id = :session_id
+                )
+                """,
+                {"session_id": session_id},
+            )
+            await cursor.execute(
+                "DELETE FROM cold_archive_search WHERE session_id = :session_id",
+                {"session_id": session_id},
+            )
+            return cursor.rowcount
+
+    async def delete_cold_archive_search_for_user(
+        self, tenant_id: str, user_id: str
+    ) -> int:
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """
+                DELETE FROM cold_archive_fts WHERE record_id IN (
+                    SELECT record_id FROM cold_archive_search
+                    WHERE tenant_id = :tenant_id AND user_id = :user_id
+                )
+                """,
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            await cursor.execute(
+                """
+                DELETE FROM cold_archive_search
+                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                """,
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            return cursor.rowcount
+
+    async def search_cold_archive_messages(
+        self,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+        *,
+        session_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[dict]:
+        fts_query = self._build_fts_query(query)
+        if fts_query == '""':
+            return []
+
+        conditions = ["cold_archive_fts MATCH :fts_query", "c.tenant_id = :tenant_id", "c.user_id = :user_id"]
+        params: dict = {
+            "fts_query": fts_query,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "limit": limit,
+        }
+        if session_id:
+            conditions.append("c.session_id = :session_id")
+            params["session_id"] = session_id
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT c.record_id AS message_id, c.session_id, c.role, c.content, c.ts,
+                   c.record_type, bm25(cold_archive_fts) AS rank_score
+            FROM cold_archive_search c
+            JOIN cold_archive_fts f ON c.record_id = f.record_id
+            WHERE {where}
+            ORDER BY rank_score ASC, c.ts DESC
+            LIMIT :limit
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(sql, params)
+            rows = await cursor.fetchall()
+
+        hits: List[dict] = []
+        for row in rows:
+            item = dict(row)
+            rank = float(item.pop("rank_score", 0.0))
+            score = 1.0 / (1.0 + max(rank, 0.0))
+            hits.append(
+                {
+                    "message_id": item.get("message_id"),
+                    "session_id": item.get("session_id"),
+                    "role": item.get("role", "user"),
+                    "content": item.get("content", ""),
+                    "ts": item.get("ts", ""),
+                    "score": score,
+                    "source": "cold",
+                }
+            )
+        return hits
 
     async def delete_online_session(self, session_id: str) -> None:
         async with self._get_connection() as conn:
@@ -633,7 +1039,133 @@ class AsyncSQLiteRelationalAdapter:
                 "DELETE FROM sessions WHERE session_id = :session_id",
                 {"session_id": session_id},
             )
+
+    async def insert_skill_run(self, data: dict) -> str:
+        return await self.insert("skill_runs", data)
+
+    async def delete_skill_runs_for_user(self, tenant_id: str, user_id: str) -> int:
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """
+                DELETE FROM skill_runs
+                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                """,
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            return cursor.rowcount or 0
+
+    async def delete_skill_runs_for_tenant(self, tenant_id: str) -> int:
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM skill_runs WHERE tenant_id = :tenant_id",
+                {"tenant_id": tenant_id},
+            )
+            return cursor.rowcount or 0
+
+    async def list_skill_runs(
+        self,
+        *,
+        tenant_id: str,
+        user_id: Optional[str] = None,
+        skill_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[dict]:
+        where: dict = {"tenant_id": tenant_id}
+        if user_id:
+            where["user_id"] = user_id
+        if skill_id:
+            where["skill_id"] = skill_id
+        rows = await self.select_many(
+            "skill_runs",
+            [
+                "run_id",
+                "skill_id",
+                "tenant_id",
+                "user_id",
+                "session_id",
+                "trace_id",
+                "success",
+                "steps_executed",
+                "error",
+                "ts",
+            ],
+            where=where,
+            order_by="ts DESC",
+            limit=limit,
+            offset=offset,
+        )
+        return [dict(r) for r in rows]
     
+    async def get_hot_memory_doc(
+        self, tenant_id: str, doc_kind: str, user_id: str = ""
+    ) -> Optional[str]:
+        row = await self.select_one(
+            "hot_memory_docs",
+            ["content"],
+            {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": user_id or ""},
+        )
+        return (row or {}).get("content")
+
+    async def upsert_hot_memory_doc(
+        self,
+        tenant_id: str,
+        doc_kind: str,
+        content: str,
+        *,
+        user_id: str = "",
+    ) -> None:
+        from datetime import datetime
+
+        uid = user_id or ""
+        ts = datetime.now().isoformat()
+        existing = await self.select_one(
+            "hot_memory_docs",
+            ["tenant_id"],
+            {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": uid},
+        )
+        payload = {
+            "tenant_id": tenant_id,
+            "doc_kind": doc_kind,
+            "user_id": uid,
+            "content": content,
+            "updated_at": ts,
+        }
+        if existing:
+            await self.update(
+                "hot_memory_docs",
+                {"content": content, "updated_at": ts},
+                {"tenant_id": tenant_id, "doc_kind": doc_kind, "user_id": uid},
+            )
+        else:
+            await self.insert("hot_memory_docs", payload)
+
+    async def delete_hot_memory_doc(
+        self, tenant_id: str, doc_kind: str, user_id: str = ""
+    ) -> None:
+        query = (
+            "DELETE FROM hot_memory_docs WHERE tenant_id = :tenant_id "
+            "AND doc_kind = :doc_kind AND user_id = :user_id"
+        )
+        params = {
+            "tenant_id": tenant_id,
+            "doc_kind": doc_kind,
+            "user_id": user_id or "",
+        }
+        async with self._get_connection() as conn:
+            await conn.execute(query, params)
+            await conn.commit()
+
+    async def list_hot_memory_user_ids(self, tenant_id: str) -> List[str]:
+        rows = await self.select_many(
+            "hot_memory_docs",
+            ["user_id"],
+            where={"tenant_id": tenant_id, "doc_kind": "user"},
+        )
+        return sorted({r["user_id"] for r in rows if r.get("user_id")})
+
     async def health(self) -> dict:
         try:
             async with self._get_connection() as conn:

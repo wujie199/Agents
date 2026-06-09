@@ -20,6 +20,18 @@ document/rag/
 
 `pipeline/`、`query/`、`bridges/`、`offline_stack.py` 为**兼容 re-export**，新代码请用上述路径。
 
+## 生产配置
+
+```bash
+export RAG_PIPELINE_CONFIG=config/rag_pipeline.production.example.yml
+export RAG_EMBEDDING_MODEL_PATH=/opt/models/embedding/bge-small-zh-v1.5
+export RAG_RERANK_MODEL_PATH=/opt/models/rerank/bge-reranker-base
+export OCR_MODEL_ROOT=/opt/models/ocr
+export RAG_USE_MOCK_RERANK_FALLBACK=false
+```
+
+生产示例关闭 mock rerank、开启 `enable_router`；dev 默认 `config/rag_pipeline.yml`。
+
 ## 替换适配器
 
 编辑 `config/rag_pipeline.yml`，实现类在 `adapters/registry.py` 注册：

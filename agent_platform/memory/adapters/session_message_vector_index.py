@@ -13,11 +13,40 @@ class SessionMessageVectorIndex:
         vector_port: Any,
         embedding_model: Any,
         collection: str = "session_messages",
+        *,
+        embed_batch_size: int = 32,
+        index_version: str = "v1",
     ):
         self._vector = vector_port
         self._embedding = embedding_model
         self._collection = collection
+        self._embed_batch_size = max(1, embed_batch_size)
+        self._index_version = index_version
         self._logger = logging.getLogger(__name__)
+
+    @property
+    def index_version(self) -> str:
+        return self._index_version
+
+    def get_stored_version(self) -> str:
+        getter = getattr(self._vector, "get_index_version", None)
+        if getter is None:
+            return ""
+        return str(getter(self._collection))
+
+    def is_version_current(self) -> bool:
+        stored = self.get_stored_version()
+        if not stored or stored == "v1":
+            count = getattr(self._vector, "count", None)
+            if count is not None and count(self._collection) == 0:
+                return True
+        return stored == self._index_version
+
+    def mark_index_current(self) -> None:
+        setter = getattr(self._vector, "set_index_version", None)
+        if setter is None:
+            return
+        setter(self._collection, self._index_version)
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         if hasattr(self._embedding, "aembed"):
@@ -26,23 +55,16 @@ class SessionMessageVectorIndex:
             return await asyncio.to_thread(self._embedding.embed, texts)
         raise RuntimeError("embedding model has no embed/aembed")
 
-    async def index_message(self, record: dict) -> None:
-        content = (record.get("content") or "").strip()
-        if not content or content == "[redacted]" or record.get("redacted"):
-            return
-
-        message_id = record["message_id"]
+    async def _upsert_text(
+        self,
+        *,
+        record_id: str,
+        content: str,
+        metadata: dict,
+    ) -> None:
         vectors = await self._embed([content])
-        metadata = {
-            "tenant_id": str(record.get("tenant_id", "")),
-            "user_id": str(record.get("user_id", "")),
-            "session_id": str(record.get("session_id", "")),
-            "message_id": message_id,
-            "role": str(record.get("role", "user")),
-            "ts": str(record.get("ts", "")),
-        }
         vector_record = VectorRecord(
-            id=message_id,
+            id=record_id,
             vector=vectors[0],
             metadata=metadata,
             content=content,
@@ -51,6 +73,52 @@ class SessionMessageVectorIndex:
             self._vector.upsert,
             self._collection,
             [vector_record],
+        )
+
+    async def index_message(self, record: dict) -> None:
+        content = (record.get("content") or "").strip()
+        if not content or content == "[redacted]" or record.get("redacted"):
+            return
+
+        message_id = record["message_id"]
+        metadata = {
+            "tenant_id": str(record.get("tenant_id", "")),
+            "user_id": str(record.get("user_id", "")),
+            "session_id": str(record.get("session_id", "")),
+            "message_id": message_id,
+            "role": str(record.get("role", "user")),
+            "ts": str(record.get("ts", "")),
+            "record_type": "message",
+        }
+        await self._upsert_text(
+            record_id=message_id,
+            content=content,
+            metadata=metadata,
+        )
+
+    async def index_tool_call(self, record: dict) -> None:
+        tool_name = (record.get("tool_name") or "").strip()
+        summary = (record.get("result_summary") or "").strip()
+        if summary == "[redacted]":
+            return
+        content = f"{tool_name}: {summary}".strip(": ")
+        if not content:
+            return
+
+        call_id = record["call_id"]
+        metadata = {
+            "tenant_id": str(record.get("tenant_id", "")),
+            "user_id": str(record.get("user_id", "")),
+            "session_id": str(record.get("session_id", "")),
+            "message_id": call_id,
+            "role": "tool",
+            "ts": str(record.get("ts", "")),
+            "record_type": "tool_call",
+        }
+        await self._upsert_text(
+            record_id=call_id,
+            content=content,
+            metadata=metadata,
         )
 
     def _build_filter(
@@ -87,15 +155,17 @@ class SessionMessageVectorIndex:
             content = hit.content or ""
             if not content or content == "[redacted]":
                 continue
+            role = meta.get("role", "user")
             messages.append(
                 {
                     "message_id": meta.get("message_id") or hit.id,
                     "session_id": meta.get("session_id", ""),
-                    "role": meta.get("role", "user"),
+                    "role": role,
                     "content": content,
                     "ts": meta.get("ts", ""),
                     "redacted": 0,
                     "vector_score": hit.score,
+                    "source": "vector",
                 }
             )
         return messages

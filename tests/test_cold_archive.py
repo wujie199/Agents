@@ -199,7 +199,13 @@ async def test_archive_expired_sessions(cold_memory):
     async with db._get_connection() as conn:
         cursor = await conn.cursor()
         await cursor.execute(
-            "UPDATE sessions SET started_at = :started_at WHERE session_id = :session_id",
+            """
+            UPDATE sessions
+            SET started_at = :started_at,
+                ended_at = :started_at,
+                status = 'closed'
+            WHERE session_id = :session_id
+            """,
             {"started_at": old_start, "session_id": ctx.session_id},
         )
         await conn.commit()
@@ -231,4 +237,34 @@ async def test_purge_user_deletes_cold(cold_memory):
 
     await memory.purge_user_data("tenant1", "user1")
     assert key not in store._blobs
+    assert await db.get_cold_archive(ctx.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_active_session_not_archived_by_expired_job(cold_memory):
+    memory, store, db = cold_memory
+    ctx = _ctx("sess-still-active")
+    await memory.ensure_session(ctx)
+    await memory.persist_turn(
+        ctx,
+        TurnRecord(
+            role="user",
+            content="still running",
+            ts=datetime.now().isoformat(),
+            trace_id="t1",
+        ),
+    )
+    old_start = (datetime.now() - timedelta(days=120)).isoformat()
+    async with db._get_connection() as conn:
+        cursor = await conn.cursor()
+        await cursor.execute(
+            "UPDATE sessions SET started_at = :started_at WHERE session_id = :session_id",
+            {"started_at": old_start, "session_id": ctx.session_id},
+        )
+        await conn.commit()
+
+    result = await memory.archive_expired_sessions(retention_days=90)
+    assert result["archived"] == 0
+    online = await db.select_one("sessions", ["session_id"], {"session_id": ctx.session_id})
+    assert online is not None
     assert await db.get_cold_archive(ctx.session_id) is None

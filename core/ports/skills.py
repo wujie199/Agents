@@ -20,6 +20,7 @@ class SkillDefinition:
     required_tools: List[str] = field(default_factory=list)
     max_duration_seconds: int = 300
     acl: List[str] = field(default_factory=list)
+    tenant_id: Optional[str] = None
 
 
 @dataclass
@@ -36,27 +37,33 @@ class SkillPort(Protocol):
         self,
         query: str,
         tenant_id: str,
-        limit: int = 3
+        limit: int = 3,
     ) -> List[dict]:
         ...
-    
+
     def get(self, skill_id: str) -> Optional[SkillDefinition]:
         ...
-    
-    def run(
+
+    async def run(
         self,
         skill_id: str,
         inputs: dict,
-        context: Any
+        context: Any,
     ) -> SkillExecutionResult:
         ...
-    
+
     def list_skills(self, tenant_id: str) -> List[str]:
         ...
-    
+
     def validate_tools(
         self,
         skill: SkillDefinition,
-        available_tools: List[str]
+        available_tools: List[str],
     ) -> List[str]:
+        ...
+
+    def get_raw(self, skill_id: str) -> Optional[dict]:
+        ...
+
+    def reload(self) -> None:
         ...

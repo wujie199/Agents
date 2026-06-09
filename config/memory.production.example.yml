@@ -4,14 +4,28 @@
 
 hot_memory_max_chars: 2200
 user_memory_max_chars: 1375
+# L1：postgresql 生产建议 relational（与 L2 同库）；file 需共享 PVC
+l1_store_backend: relational
 store_dir: data/memory_prod
 skills_dir: skills/published
 skills_drafts_dir: skills/drafts
+skills_meta_dir: skills/meta
+skill_auto_extract_draft: true
+skill_auto_extract_min_steps: 2
 external_profiles_dir: data/external_profiles
+external_profiles_backend: http
+external_profiles_http_url: https://crm.example.com/api/v1/profiles
+external_profiles_http_timeout: 10
+external_profile_cache_ttl: 300
+external_profile_cache_backend: redis
+external_merge_on_finalize: true
+purge_delete_external_audit: true
+purge_tenant_l4_strip_user_keys: true
 
 session_search_max_chars: 2000
 session_search_cache_ttl: 900
 retention_days: 90
+checkpoint_retention_days: 90
 memory_summarizer_role: memory_summarizer_llm
 use_llm_compress: true
 use_llm_summarize: true
@@ -38,6 +52,17 @@ reindex_batch_size: 200
 enable_cold_archive: true
 cold_archive_prefix: l2/cold
 cold_archive_compress: true
+cold_archive_search_scan_limit: 100
+cold_archive_keep_vectors: true
+cold_archive_encrypt_at_rest: true
+session_search_cold_fallback: true
+session_search_rerank: true
+session_vector_auto_reindex_on_version_change: true
+turn_buffer_flush_size: 10
+l1_use_file_lock: true
+# 多 Pod 共享 L1 时 store_dir 挂载同一 PVC（如 data/memory_prod）
+# 可选：MEMORY_ENCRYPTION_KEY 或 memory_encryption_key 启用冷归档字段加密
+# memory_encryption_key: ""
 
 # 迁移完成后保留 SQLite 备份路径（只读对照）
 archive_sqlite_path: data/session_archive.db

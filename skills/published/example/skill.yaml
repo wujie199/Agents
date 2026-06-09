@@ -9,14 +9,16 @@ triggers:
   - 报告
   - 生成报告
   - report
-anti_patterns:
-  - 未提供文档来源时盲目生成
-success_rate: 1.0
-last_used_at: null
-required_tools: []
+required_tools:
+  - skill_echo
 max_duration_seconds: 300
-acl: []
+acl:
+  - user
+  - cli
+  - test
 steps:
-  - action: greet
-    tool: null
-    on_failure: abort
+  - action: echo
+    tool: skill_echo
+    args_template:
+      message: "$inputs.message"
+    on_failure: skip

@@ -93,9 +93,22 @@ class EnterpriseRedisCacheAdapter:
         
         self._local_fallback: Dict[str, Any] = {}
         self._fallback_ttl: Dict[str, float] = {}
+        self._stats: Dict[str, int] = {
+            "get_hit": 0,
+            "get_miss": 0,
+            "set_ok": 0,
+            "fallback_used": 0,
+            "circuit_open": 0,
+        }
         
         self._logger = logging.getLogger(__name__)
         self._health_status = "unknown"
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            **self._stats,
+            "circuit_breaker_state": self._circuit_breaker.state,
+        }
     
     def _make_key(self, key: str) -> str:
         if key.startswith(self._prefix):
@@ -104,6 +117,7 @@ class EnterpriseRedisCacheAdapter:
     
     async def _execute_with_retry(self, operation, *args, **kwargs) -> Any:
         if self._circuit_breaker.is_open():
+            self._stats["circuit_open"] += 1
             self._logger.warning("Circuit breaker is open, using fallback")
             raise redis.ConnectionError("Circuit breaker open")
         
@@ -135,17 +149,26 @@ class EnterpriseRedisCacheAdapter:
             value = await self._execute_with_retry(self._client.get, full_key)
             
             if value is None:
+                self._stats["get_miss"] += 1
                 return None
             
             import json
             try:
+                self._stats["get_hit"] += 1
                 return json.loads(value)
             except json.JSONDecodeError:
+                self._stats["get_hit"] += 1
                 return value
                 
         except (redis.ConnectionError, redis.TimeoutError):
+            self._stats["fallback_used"] += 1
             if self._enable_fallback:
-                return self._local_fallback.get(full_key)
+                val = self._local_fallback.get(full_key)
+                if val is not None:
+                    self._stats["get_hit"] += 1
+                else:
+                    self._stats["get_miss"] += 1
+                return val
             raise
     
     async def set(
@@ -169,6 +192,7 @@ class EnterpriseRedisCacheAdapter:
                 )
             else:
                 await self._execute_with_retry(self._client.set, full_key, value)
+            self._stats["set_ok"] += 1
             
             if self._enable_fallback:
                 self._local_fallback[full_key] = value
@@ -176,10 +200,12 @@ class EnterpriseRedisCacheAdapter:
                     self._fallback_ttl[full_key] = time.time() + ttl_seconds
                     
         except (redis.ConnectionError, redis.TimeoutError):
+            self._stats["fallback_used"] += 1
             if self._enable_fallback:
                 self._local_fallback[full_key] = value
                 if ttl_seconds:
                     self._fallback_ttl[full_key] = time.time() + ttl_seconds
+                self._stats["set_ok"] += 1
             else:
                 raise
     
@@ -261,11 +287,13 @@ class EnterpriseRedisCacheAdapter:
             return {
                 "status": "healthy",
                 "type": "redis",
+                "prefix": self._prefix,
                 "latency_ms": round(latency, 2),
                 "connected_clients": info.get("connected_clients", 0),
                 "used_memory_human": info.get("used_memory_human", "unknown"),
                 "circuit_breaker_state": self._circuit_breaker.state,
-                "pool_max_connections": self._pool.max_connections
+                "pool_max_connections": self._pool.max_connections,
+                "cache_stats": dict(self._stats),
             }
         except Exception as e:
             self._health_status = "unhealthy"

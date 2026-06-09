@@ -5,6 +5,8 @@ import logging
 
 from document.rag.query.router.classifier import QueryType, ClassificationResult
 
+_logger = logging.getLogger("rag.routing_rules")
+
 
 class BackendType(str, Enum):
     REDIS_CACHE = "redis_cache"
@@ -28,7 +30,7 @@ class RetrievalPlan:
     graph_hop: int = 0
     top_k: int = 10
     rerank_top_n: int = 5
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "primary": self.primary.value,
@@ -43,7 +45,91 @@ class RetrievalPlan:
 
 
 class RoutingRules:
-    """
-    æ ¹æ® query_type åç¹å¾å³å®æ£ç´¢ç­ç¥ï¼
-    1. è§åä¼åï¼ç¡®å®æ§ï¼å¯å®¡è®¡ï¼
-    """
+    """根据 query_type 与启用的后端生成 retrieval_plan。"""
+
+    def __init__(
+        self,
+        enable_graph: bool = False,
+        enable_sql: bool = False,
+        *,
+        default_top_k: int = 10,
+        default_rerank_n: int = 5,
+    ):
+        self._enable_graph = enable_graph
+        self._enable_sql = enable_sql
+        self._default_top_k = default_top_k
+        self._default_rerank_n = default_rerank_n
+
+    def get_supported_backends(self) -> List[BackendType]:
+        backends = [BackendType.REDIS_CACHE, BackendType.VECTOR]
+        if self._enable_sql:
+            backends.append(BackendType.SQL)
+        if self._enable_graph:
+            backends.append(BackendType.GRAPH)
+        return backends
+
+    def route(
+        self,
+        classification: ClassificationResult,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> RetrievalPlan:
+        qt = classification.query_type
+        top_k = self._default_top_k
+        rerank_n = self._default_rerank_n
+
+        if qt == QueryType.FACTUAL_EXACT:
+            secondary: List[BackendType] = []
+            if self._enable_sql:
+                secondary.append(BackendType.VECTOR)
+            return RetrievalPlan(
+                primary=BackendType.SQL,
+                secondary=secondary,
+                fusion="first_match",
+                top_k=top_k,
+                rerank_top_n=rerank_n,
+            )
+
+        if qt == QueryType.GRAPH:
+            secondary = [BackendType.VECTOR] if self._enable_graph else []
+            return RetrievalPlan(
+                primary=BackendType.GRAPH,
+                secondary=secondary,
+                fusion="rrf",
+                graph_hop=2,
+                top_k=top_k,
+                rerank_top_n=rerank_n,
+            )
+
+        if qt == QueryType.RELATIONAL:
+            if self._enable_sql:
+                return RetrievalPlan(
+                    primary=BackendType.SQL,
+                    secondary=[BackendType.VECTOR],
+                    fusion="rrf",
+                    top_k=top_k,
+                    rerank_top_n=rerank_n,
+                )
+
+        if qt == QueryType.HYBRID:
+            secondary = []
+            if self._enable_sql:
+                secondary.append(BackendType.SQL)
+            if self._enable_graph:
+                secondary.append(BackendType.GRAPH)
+            return RetrievalPlan(
+                primary=BackendType.VECTOR,
+                secondary=secondary,
+                fusion="rrf",
+                top_k=top_k,
+                rerank_top_n=rerank_n,
+            )
+
+        # SEMANTIC_DOC / OPERATIONAL / default
+        secondary = [BackendType.SQL] if self._enable_sql else []
+        return RetrievalPlan(
+            primary=BackendType.VECTOR,
+            secondary=secondary,
+            fusion="rrf",
+            top_k=top_k,
+            rerank_top_n=rerank_n,
+        )

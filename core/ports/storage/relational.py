@@ -110,6 +110,16 @@ class RelationalPort(Protocol):
     ) -> List[dict]:
         ...
 
+    async def search_tool_calls(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[dict]:
+        ...
+
     async def purge_expired_sessions(self, retention_days: int = 90) -> int:
         ...
 

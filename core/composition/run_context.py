@@ -32,6 +32,9 @@ class RunContext:
     observability: Optional["ObservabilityPort"] = None
     identity: Optional["IdentityPort"] = None
 
+    turn_buffer: Optional[Any] = None
+    checkpointer: Optional[Any] = None
+
     extra: dict = field(default_factory=dict)
 
     @property
