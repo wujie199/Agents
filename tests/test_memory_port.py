@@ -15,7 +15,10 @@ from agent_platform.memory.adapters.hot_memory_compressor_adapter import (
     TruncatingHotMemoryCompressorAdapter,
 )
 from agent_platform.memory.adapters.hot_memory_file_adapter import HotMemoryFileAdapter
-from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
+from agent_platform.memory.adapters.memory_port_adapter import (
+    MemoryPortAdapter,
+    SESSION_SEARCH_EMPTY_SENTINEL,
+)
 from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapter
 from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
 from agent_platform.storage.adapters.memory.async_cache_adapter import (
@@ -90,6 +93,7 @@ def memory(tmp_store, tmp_db, external_profiles):
         compressor=TruncatingHotMemoryCompressorAdapter(),
         external_memory=external,
         cache=AsyncMemoryCacheAdapter(prefix="sess"),
+        session_search_negative_cache_ttl=120,
     )
 
 
@@ -180,6 +184,19 @@ class TestL2Archive:
         assert ended["status"] == "closed"
 
     @pytest.mark.asyncio
+    async def test_session_search_negative_cache(self, memory):
+        ctx = _ctx("neg_cache_empty")
+        r1 = await memory.session_search("nonexistent_xyz_query", ctx, limit=3)
+        assert r1 == ""
+        cache_key = memory._session_search_cache_key(
+            ctx, "nonexistent_xyz_query", 3, "session",
+        )
+        cached = await memory._cache_get(cache_key)
+        assert cached == SESSION_SEARCH_EMPTY_SENTINEL
+        r2 = await memory.session_search("nonexistent_xyz_query", ctx, limit=3)
+        assert r2 == ""
+
+    @pytest.mark.asyncio
     async def test_session_search_cached(self, memory):
         ctx = _ctx("search_sess")
         await memory.persist_turn(
@@ -248,7 +265,8 @@ class TestL2Archive:
         assert "sess_b" in cross or "Beta" in cross
 
     @pytest.mark.asyncio
-    async def test_cache_invalidated_after_persist(self, memory):
+    async def test_session_search_finds_new_content_after_persist(self, memory):
+        """新 query 仍能检索到新 persist 的消息（与缓存 key 无关）。"""
         ctx = _ctx("cache_inv")
         await memory.persist_turn(
             ctx,
@@ -266,6 +284,36 @@ class TestL2Archive:
         )
         second = await memory.session_search("secret", ctx, limit=3)
         assert "secret" in second.lower()
+
+    @pytest.mark.asyncio
+    async def test_session_search_cache_survives_persist(self, memory):
+        """同 query 跨 persist_turn 仍命中缓存；仅 finalize 时失效。"""
+        ctx = _ctx("cache_survive")
+        await memory.persist_turn(
+            ctx,
+            TurnRecord(
+                role="user",
+                content="项目代号 Phoenix",
+                ts=datetime.now().isoformat(),
+            ),
+        )
+        r1 = await memory.session_search("Phoenix", ctx, limit=3)
+        cache_key = memory._session_search_cache_key(ctx, "Phoenix", 3, "session")
+        assert await memory._cache_get(cache_key) is not None
+        await memory.persist_turn(
+            ctx,
+            TurnRecord(
+                role="assistant",
+                content="好的，已记录 Phoenix。",
+                ts=datetime.now().isoformat(),
+            ),
+        )
+        r2 = await memory.session_search("Phoenix", ctx, limit=3)
+        assert "Phoenix" in r1
+        assert r1 == r2
+        assert await memory._cache_get(cache_key) is not None
+        await memory.finalize_session(ctx)
+        assert await memory._cache_get(cache_key) is None
 
     @pytest.mark.asyncio
     async def test_redacted_excluded_from_search(self, memory, tmp_db):

@@ -26,8 +26,15 @@ RECALL_TOOL_HINT = (
 )
 
 PROFILE_NAME_HINT = (
-    "【工具提示】用户正在告知或更正姓名/称呼。请用自然语言确认，"
-    "并调用 remember 工具将 key=姓名 或 称呼 写入长期记忆。"
+    "【工具提示】用户正在告知或更正姓名/称呼。请用自然语言确认。"
+    "若尚未写入记忆，请调用 remember_user_fact（key=姓名 或 称呼）。"
+    "系统可能已自动加入待确认列表，可提示用户输入 /confirm 确认写入 L1。"
+)
+
+SKILL_TOOL_HINT = (
+    "【工具提示】用户要使用 L3 技能/流程。请先 skill_search 查找匹配技能，"
+    "再 run_skill(skill_id, inputs) 执行；inputs 为 JSON 对象字符串。"
+    "若上方【可用技能】已有候选，可直接选用其 skill_id。"
 )
 
 

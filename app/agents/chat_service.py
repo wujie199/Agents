@@ -119,18 +119,22 @@ async def execute_chat_turn(
     record_rag_cache_stats(handle.run_ctx)
     record_redis_cache_stats(handle.run_ctx)
     if is_memory_runtime_debug():
+        extra_trace = {
+            "engine": engine,
+            "evidence_count": result.evidence_count,
+            "rag_empty": result.rag_empty,
+            "history_turns": result.history_turns,
+            "assistant_chars": len(result.assistant_text or ""),
+            "assistant_preview": (result.assistant_text or "")[:400],
+        }
+        decision = (handle.run_ctx.extra or {}).get("turn_decision")
+        if isinstance(decision, dict):
+            extra_trace["decision"] = decision
         await log_turn_trace(
             handle.run_ctx,
             phase="turn_done",
             user_message=text,
-            extra={
-                "engine": engine,
-                "evidence_count": result.evidence_count,
-                "rag_empty": result.rag_empty,
-                "history_turns": result.history_turns,
-                "assistant_chars": len(result.assistant_text or ""),
-                "assistant_preview": (result.assistant_text or "")[:400],
-            },
+            extra=extra_trace,
         )
     return result
 

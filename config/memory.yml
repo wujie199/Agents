@@ -4,7 +4,8 @@ store_dir: data/memory_dev
 skills_dir: skills/published
 skills_drafts_dir: skills/drafts
 skills_meta_dir: skills/meta
-skill_auto_extract_draft: false
+# dev 默认开启：成功 skill run 自动写 draft（人工 publish 不变）
+skill_auto_extract_draft: true
 skill_deprecate_threshold: 0.2
 skill_include_deprecated_in_search: false
 skill_auto_extract_min_steps: 2
@@ -17,12 +18,14 @@ purge_delete_external_audit: true
 purge_tenant_l4_strip_user_keys: true
 session_search_max_chars: 2000
 session_search_cache_ttl: 900
+session_search_negative_cache_ttl: 120
 retention_days: 90
 checkpoint_retention_days: 90
 memory_summarizer_role: memory_summarizer_llm
 use_llm_compress: true
 use_llm_summarize: true
-enable_session_vector_index: false
+# L2 混合检索（mock 向量，无需外置 embedding 模型）
+enable_session_vector_index: true
 session_vector_dir: data/session_vectors
 session_vector_collection: session_messages
 session_hybrid_search: true
@@ -39,7 +42,8 @@ pg_user: postgres
 pg_password: ""
 pg_pool_size: 10
 reindex_batch_size: 200
-enable_cold_archive: false
+# 冷归档（对象存储走本地 data/objects/ fallback，无需 S3）
+enable_cold_archive: true
 cold_archive_prefix: l2/cold
 cold_archive_compress: true
 cold_archive_search_scan_limit: 100
@@ -51,4 +55,5 @@ session_vector_auto_reindex_on_version_change: true
 turn_buffer_flush_size: 10
 l1_use_file_lock: true
 l1_store_backend: file
-# 生产见 config/memory.production.example.yml（PG + cold_archive + vector）
+# dev 默认已开启：向量(mock)+冷归档(本地)+skill draft+L4 file
+# 生产见 config/memory.production.example.yml；可选 MEMORY_CONFIG 覆盖

@@ -75,7 +75,7 @@ async def _check_object_store(
     config_dir: str,
     data_dir: str,
 ) -> dict[str, Any]:
-    mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
+    mem_cfg = load_memory_config()
     if not mem_cfg.get("enable_cold_archive"):
         return {"status": "skipped", "reason": "enable_cold_archive=false"}
     from agent_platform.storage.adapters.s3.s3_object_store_adapter import (

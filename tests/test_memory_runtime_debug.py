@@ -76,12 +76,20 @@ async def test_collect_memory_runtime_status_verbose(tmp_path, monkeypatch):
     set_memory_runtime_verbose(False)
 
 
-def test_resolve_memory_trace_dev_auto():
+def test_resolve_memory_trace_dev_off_by_default():
     from app.agents.memory_runtime_debug import resolve_memory_trace
 
     on, console = resolve_memory_trace(profile="dev")
-    assert on is True
+    assert on is False
     assert console is False
+
+
+def test_resolve_memory_trace_debug_flag():
+    from app.agents.memory_runtime_debug import resolve_memory_trace
+
+    on, console = resolve_memory_trace(profile="dev", debug=True)
+    assert on is True
+    assert console is True
 
 
 def test_resolve_memory_trace_no_debug():

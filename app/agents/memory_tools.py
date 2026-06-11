@@ -52,7 +52,11 @@ def build_memory_tools(
             require_hitl=chat_cfg.remember_require_hitl,
         )
         if chat_cfg.remember_require_hitl:
-            return f"已加入待确认记忆：{safe_key}={val}（会话结束时写入 L1）"
+            return (
+                f"已加入待确认记忆：{safe_key}={val}。"
+                "输入 /pending 查看，/confirm 立即写入 L1；"
+                "或会话结束时自动 finalize。"
+            )
         return f"已记住：{safe_key}={val}"
 
     tools: List[StructuredTool] = [

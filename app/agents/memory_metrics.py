@@ -20,7 +20,10 @@ def _metric_stats_from_obs(obs: Any) -> dict:
     names = [
         "memory.chat.turn",
         "memory.chat.evidence_count",
+        "memory.chat.history_turns",
+        "memory.turn.latency_ms",
         "memory.l1.confirm",
+        "memory.l1.pending",
         "memory.purge",
         "memory.session_search",
         "cache.rag.hit",
@@ -28,6 +31,8 @@ def _metric_stats_from_obs(obs: Any) -> dict:
         "cache.redis.hit",
         "cache.redis.miss",
         "cache.redis.fallback",
+        "cache.session_search.hit",
+        "cache.session_search.miss",
     ]
     out: dict = {}
     raw = obs.get_metrics()
@@ -79,8 +84,29 @@ def record_l1_confirm(ctx: RunContext, count: int) -> None:
     record_memory_metric(ctx, "memory.l1.confirm", float(count))
 
 
-def record_l1_pending(ctx: RunContext, count: int) -> None:
+def record_l1_pending(ctx: RunContext, count: int = 1) -> None:
     record_memory_metric(ctx, "memory.l1.pending", float(count))
+
+
+def record_turn_latency(ctx: RunContext, latency_ms: float) -> None:
+    record_memory_metric(ctx, "memory.turn.latency_ms", latency_ms)
+
+
+def record_turn_decision(ctx: RunContext, decision: dict) -> None:
+    """单轮检索/记忆决策摘要（供 trace 与指标）。"""
+    if not isinstance(getattr(ctx, "extra", None), dict):
+        return
+    ctx.extra["turn_decision"] = decision
+    record_memory_metric(
+        ctx,
+        "memory.turn.decision",
+        1.0,
+        tags={
+            "intent": str(decision.get("intent") or "unknown"),
+            "run_rag": str(bool(decision.get("run_rag"))),
+            "recall_hit": str(bool(decision.get("recall_prefetch_hit"))),
+        },
+    )
 
 
 def record_purge(ctx: RunContext, *, scope: str, count: float = 1.0) -> None:

@@ -53,6 +53,93 @@ async def list_user_sessions(
     return await lister(req.tenant_id, req.user_id, limit=max(1, min(limit, 100)))
 
 
+async def list_user_sessions_enriched(
+    ctx: RunContext,
+    *,
+    limit: int = 20,
+) -> List[dict]:
+    """在线 session + 冷归档 session（标注 storage）。"""
+    cap = max(1, min(limit, 100))
+    req = ctx.request
+    memory = ctx.require_memory()
+    rows = await list_user_sessions(ctx, limit=cap)
+    by_id: dict[str, dict] = {}
+    for row in rows:
+        sid = str(row.get("session_id") or "")
+        if not sid:
+            continue
+        enriched = dict(row)
+        status = str(enriched.get("status") or "active")
+        if status == "archived":
+            enriched["storage"] = "cold"
+        elif status == "closed":
+            enriched["storage"] = "online_closed"
+        else:
+            enriched["storage"] = "online"
+        by_id[sid] = enriched
+
+    cold_lister = getattr(memory, "list_cold_archives", None)
+    if cold_lister is not None:
+        try:
+            cold_rows = await cold_lister(req.tenant_id, req.user_id, limit=cap)
+            for cold in cold_rows or []:
+                sid = str(cold.get("session_id") or "")
+                if not sid or sid in by_id:
+                    continue
+                by_id[sid] = {
+                    "session_id": sid,
+                    "user_id": req.user_id,
+                    "tenant_id": req.tenant_id,
+                    "status": "archived",
+                    "storage": "cold",
+                    "started_at": cold.get("started_at"),
+                    "ended_at": cold.get("archived_at") or cold.get("ended_at"),
+                    "message_count": cold.get("message_count"),
+                }
+        except Exception:
+            pass
+
+    merged = sorted(
+        by_id.values(),
+        key=lambda r: str(r.get("started_at") or r.get("ended_at") or ""),
+        reverse=True,
+    )
+    return merged[:cap]
+
+
+async def refresh_l4_profile(ctx: RunContext) -> dict:
+    """会话中刷新 L4 外部画像（清缓存 + 重拉，不 merge L1）。"""
+    memory = ctx.require_memory()
+    refresher = getattr(memory, "refresh_external_profile", None)
+    if refresher is None:
+        raise RuntimeError("MemoryPort 不支持 refresh_external_profile")
+    result = await refresher(ctx.request)
+    if isinstance(getattr(ctx, "extra", None), dict):
+        ctx.extra["l4_last_refresh"] = result
+    return result
+
+
+def format_finalize_summary(summary: dict | None) -> str:
+    """格式化 finalize 结果供 REPL/API 展示。"""
+    if not summary:
+        return "（无 finalize 摘要）"
+    parts: list[str] = []
+    pending = int(summary.get("pending_applied") or 0)
+    if pending:
+        parts.append(f"pending L1 写入 {pending} 条")
+    l1_ext = int(summary.get("l1_extract_pending") or 0)
+    if l1_ext:
+        parts.append(f"L2→L1 抽取 pending {l1_ext} 条")
+    l4 = int(summary.get("l4_merged") or 0)
+    if l4:
+        keys = summary.get("l4_keys") or []
+        key_txt = ", ".join(str(k) for k in keys if k) or f"{l4} 条"
+        parts.append(f"L4→L1 合并 {l4} 条（{key_txt}）")
+    if not parts:
+        return "finalize 完成（无新增 L1 变更）"
+    return "；".join(parts)
+
+
 async def confirm_pending_l1(ctx: RunContext) -> int:
     memory = ctx.require_memory()
     confirmer = getattr(memory, "confirm_pending_deltas", None)

@@ -13,7 +13,12 @@ from agent_platform.memory.adapters.turn_buffer import TurnBuffer
 from app.agents.chat_config import ChatAgentConfig, load_chat_config
 from app.agents.chat_nodes import build_turn_messages, persist_user_and_assistant
 from app.agents.react_loop import _extract_llm_text, _resolve_turn_buffer
-from app.agents.react_turn import dict_messages_to_lc, invoke_react_agent
+from app.agents.react_turn import (
+    dict_messages_to_lc,
+    invoke_direct_llm,
+    invoke_react_agent,
+)
+from app.agents.retrieval_router import should_use_direct_llm_for_intent
 
 
 @dataclass
@@ -51,12 +56,11 @@ async def run_chat_turn(
         rag_plan=rag_plan,
     )
 
-    from app.agents.retrieval_router import should_use_direct_llm_for_intent
-    from app.agents.react_turn import invoke_direct_llm
-
     intent = str((ctx.extra or {}).get("retrieval_intent") or "legacy")
     lc_messages = dict_messages_to_lc(messages)
-    if should_use_direct_llm_for_intent(intent, cfg):
+
+    use_direct = should_use_direct_llm_for_intent(intent, cfg)
+    if use_direct:
         assistant_text = await invoke_direct_llm(ctx, lc_messages, cfg)
     elif cfg.enable_memory_tools:
         assistant_text = await invoke_react_agent(ctx, lc_messages, cfg)

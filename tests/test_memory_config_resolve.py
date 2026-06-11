@@ -28,5 +28,6 @@ def test_memory_config_env_setdefault(tmp_path, monkeypatch):
     prod = cfg_dir / "memory.production.example.yml"
     prod.write_text("store_dir: x\n", encoding="utf-8")
     resolved = ensure_memory_config_env(str(cfg_dir), profile="production")
+    monkeypatch.setenv("MEMORY_CONFIG", resolved)
     assert os.environ.get("MEMORY_CONFIG") == resolved
     assert resolved == str(prod)

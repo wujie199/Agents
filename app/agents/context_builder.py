@@ -35,9 +35,13 @@ _CROSS_SESSION_RE = re.compile(
     r"别的会话|其他会话|历史会话|上次会话|另一个会话|跨会话|所有会话",
 )
 
-# 技能意图
+# 技能意图（L3：显式技能/流程/模板）
 _SKILL_RE = re.compile(
-    r"技能|skill|用.*工具|执行.*流程|json_section|report_context|session_lookup",
+    r"技能|skill|"
+    r"用.{0,12}技能|按.{0,12}技能|运行.{0,12}技能|执行.{0,12}技能|"
+    r"用.*工具|执行.*流程|跑一下.*流程|"
+    r"json_section|report_context|session_lookup|list_json_titles|"
+    r"模板|工作流|workflow",
     re.I,
 )
 

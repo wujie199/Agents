@@ -105,7 +105,7 @@ class RetrievalRouter:
         if plan.cache_policy != "no_cache":
             cache_key = self._get_cache_key(queries, context.tenant_id)
             cached = await self._get_from_cache(cache_key)
-            if cached:
+            if cached is not None and not cached.empty:
                 self._logger.info("Cache hit, returning cached results")
                 return cached
 
@@ -140,7 +140,7 @@ class RetrievalRouter:
                 empty=False,
             )
 
-        if plan.cache_policy == "read_through":
+        if plan.cache_policy == "read_through" and not bundle.empty:
             cache_key = self._get_cache_key(queries, context.tenant_id)
             await self._set_cache(cache_key, bundle)
 
@@ -264,7 +264,7 @@ class RetrievalRouter:
 
         try:
             embedding = await self._get_embedding(query)
-            return await vector_similarity_search(
+            hits = await vector_similarity_search(
                 self._vector_port,
                 self._collection,
                 embedding,
@@ -272,6 +272,7 @@ class RetrievalRouter:
                 context.tenant_id,
                 context.acl,
             )
+            return hits
         except Exception as e:
             self._logger.error("Vector retrieval failed: %s", e)
             return []

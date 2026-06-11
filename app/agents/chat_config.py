@@ -46,7 +46,7 @@ class ChatAgentConfig:
     # 知识类问题是否注入 L4 外部画像
     l4_prefetch_on_knowledge: bool = True
     recall_skip_rag_when_prefetch_hit: bool = True
-    recall_skip_rag_when_prefetch_miss: bool = True
+    recall_skip_rag_when_prefetch_miss: bool = False
     # 滚动摘要仅保留 user 轮次，避免 assistant 幻觉污染 context
     rolling_summary_user_only: bool = True
     # 有检索证据时强制 grounding，禁止编造未出现在证据中的事实
@@ -63,6 +63,8 @@ class ChatAgentConfig:
     enable_skill_tools: bool = True
     enable_l4_tools: bool = True
     remember_require_hitl: bool = True
+    # REPL 退出时自动确认剩余 pending L1（dev profile 默认 true）
+    auto_confirm_pending_on_exit: bool = False
     # L2 交互写入
     interactive_flush_buffer: bool = True
     # finalize L2→L1
@@ -92,13 +94,27 @@ def _tuple_keys(raw: Any) -> Tuple[str, ...]:
     return _DEFAULT.l1_extract_allowed_keys
 
 
-def load_chat_config(config_dir: str | Path = "config") -> ChatAgentConfig:
+def _merge_chat_profile(chat: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    merged = dict(chat)
+    profiles = merged.pop("profiles", None) or {}
+    if profile and profile in profiles:
+        overlay = profiles.get(profile) or {}
+        if isinstance(overlay, dict):
+            merged.update(overlay)
+    return merged
+
+
+def load_chat_config(
+    config_dir: str | Path = "config",
+    *,
+    profile: str | None = None,
+) -> ChatAgentConfig:
     path = Path(config_dir) / "chat.yml"
     if not path.is_file():
         return _DEFAULT
     with path.open(encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f) or {}
-    chat = raw.get("chat") or {}
+    chat = _merge_chat_profile(raw.get("chat") or {}, profile)
     return ChatAgentConfig(
         enable_rag=bool(chat.get("enable_rag", _DEFAULT.enable_rag)),
         max_history_turns=int(
@@ -236,6 +252,12 @@ def load_chat_config(config_dir: str | Path = "config") -> ChatAgentConfig:
         ),
         remember_require_hitl=bool(
             chat.get("remember_require_hitl", _DEFAULT.remember_require_hitl)
+        ),
+        auto_confirm_pending_on_exit=bool(
+            chat.get(
+                "auto_confirm_pending_on_exit",
+                _DEFAULT.auto_confirm_pending_on_exit,
+            )
         ),
         interactive_flush_buffer=bool(
             chat.get("interactive_flush_buffer", _DEFAULT.interactive_flush_buffer)

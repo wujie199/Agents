@@ -117,6 +117,12 @@ class CachedExternalMemoryAdapter:
         await self._invalidate_pattern(f"{tenant_id}:{user_id}:*")
         await self._invalidate_pattern(f"tenant_users:{tenant_id}")
 
+    async def invalidate_user_profile_cache(
+        self, tenant_id: str, user_id: str
+    ) -> None:
+        """会话中强制刷新 L4 画像前调用。"""
+        await self._invalidate_user(tenant_id, user_id)
+
     async def _invalidate_tenant(self, tenant_id: str) -> None:
         await self._invalidate_pattern(f"{tenant_id}:*")
         await self._invalidate_pattern(f"tenant_users:{tenant_id}")

@@ -39,63 +39,7 @@ from app.agents.text_sanitize import (
 SearchScope = Literal["session", "user"]
 
 
-# #region agent log
-def _session_search_cache_debug(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-) -> None:
-    try:
-        from app.agents.memory_runtime_debug import is_memory_runtime_debug
-
-        if not is_memory_runtime_debug():
-            return
-    except ImportError:
-        return
-    import os
-    import time
-    from pathlib import Path
-
-    payload = {
-        "sessionId": "d0a1fc",
-        "runId": "session-search-cache",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        default_log = (
-            Path(__file__).resolve().parents[3] / ".cursor" / "debug-d0a1fc.log"
-        )
-        log_path = Path(os.environ.get("MEMORY_DEBUG_LOG", str(default_log)))
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    try:
-        from app.agents.memory_runtime_debug import (
-            is_memory_runtime_debug,
-            memory_debug_console_enabled,
-        )
-
-        if is_memory_runtime_debug() and memory_debug_console_enabled():
-            hit = data.get("cache_hit")
-            tag = "HIT" if hit is True else ("MISS" if hit is False else "—")
-            print(
-                f"[session_search cache {tag}] {message} "
-                f"adapter={data.get('cache_adapter', '?')} "
-                f"key={str(data.get('cache_key', ''))[:48]}",
-                flush=True,
-            )
-    except ImportError:
-        pass
-
-
-# #endregion
+SESSION_SEARCH_EMPTY_SENTINEL = "__SESSION_SEARCH_EMPTY__"
 
 
 def _estimate_token_count(text: str) -> int:
@@ -120,6 +64,7 @@ class MemoryPortAdapter:
         hot_memory_max_chars: int = 2200,
         user_memory_max_chars: int = 1375,
         session_search_cache_ttl: int = 900,
+        session_search_negative_cache_ttl: int = 120,
         retention_days: int = 90,
         hot_memory: Optional[HotMemoryFileAdapter] = None,
         privacy: Optional[PrivacyPort] = None,
@@ -161,6 +106,7 @@ class MemoryPortAdapter:
         self._vector_index = session_vector_index
         self._session_hybrid_search = session_hybrid_search
         self._session_search_cache_ttl = session_search_cache_ttl
+        self._session_search_negative_cache_ttl = session_search_negative_cache_ttl
         self._session_search_cold_fallback = session_search_cold_fallback
         self._session_search_rerank = session_search_rerank
         self._cold_archive_keep_vectors = cold_archive_keep_vectors
@@ -250,15 +196,16 @@ class MemoryPortAdapter:
             }
         )
 
-    async def finalize_session(self, context: RequestContext) -> None:
+    async def finalize_session(self, context: RequestContext) -> dict:
         pending = self._hot.flush_pending_deltas(
             context.tenant_id, context.user_id
         )
         for delta in pending:
             await self.apply_memory_delta(context, delta)
 
+        l4_changes: List[dict] = []
         if self._external_merge_on_finalize:
-            await self._merge_l4_facts_into_user(context)
+            l4_changes = await self._merge_l4_facts_into_user(context)
 
         memory_raw = self._hot.get_raw_memory(context.tenant_id)
         if len(memory_raw) > self._hot_max:
@@ -275,19 +222,45 @@ class MemoryPortAdapter:
             self._hot.save_user(context.tenant_id, context.user_id, compressed)
 
         self._hot.invalidate_cache(context.tenant_id, context.user_id)
-        await self._invalidate_session_search_cache(context)
+        await self._invalidate_session_search_cache(context, reason="finalize")
+        return {
+            "pending_applied": len(pending),
+            "l4_merged": len(l4_changes),
+            "l4_keys": [str(c.get("key") or "") for c in l4_changes if c.get("key")],
+        }
+
+    async def refresh_external_profile(
+        self, context: RequestContext
+    ) -> dict:
+        """失效 L4 缓存并重新拉取 facts（不写入 L1）。"""
+        ext = self._external
+        invalidator = getattr(ext, "invalidate_user_profile_cache", None)
+        if callable(invalidator):
+            await invalidator(context.tenant_id, context.user_id)
+        elif hasattr(ext, "_invalidate_user"):
+            await ext._invalidate_user(context.tenant_id, context.user_id)
+        facts = await self.fetch_profile_facts(
+            context.tenant_id, context.user_id
+        )
+        return {
+            "refreshed": True,
+            "fact_count": len(facts),
+            "facts": facts[:12],
+        }
 
     async def end_session(
         self,
         context: RequestContext,
         status: str = "closed",
         finalize: bool = True,
-    ) -> None:
+    ) -> dict:
+        summary: dict = {}
         if finalize:
-            await self.finalize_session(context)
+            summary = await self.finalize_session(context)
         if self._archive_db is None:
-            return
+            return summary
         await self._archive_db.end_session(context.session_id, status=status)
+        return summary
 
     async def confirm_pending_deltas(self, context: RequestContext) -> int:
         pending = self._hot.flush_pending_deltas(
@@ -344,7 +317,6 @@ class MemoryPortAdapter:
                 )
             except Exception as e:
                 self._logger.warning("Session vector index failed: %s", e)
-        await self._invalidate_session_search_cache(context)
 
     async def persist_tool_call(
         self, context: RequestContext, record: ToolCallRecord
@@ -416,8 +388,45 @@ class MemoryPortAdapter:
     async def apply_memory_delta(
         self, context: RequestContext, delta: MemoryDelta
     ) -> None:
-        self._hot.apply_delta(context.tenant_id, context.user_id, delta)
+        from app.agents.context_builder import is_allowed_l1_value
+
+        if delta.source in ("user", "external"):
+            if not is_allowed_l1_value(delta.key, delta.value):
+                self._logger.warning(
+                    "Rejected L1 delta key=%s (value not allowed)", delta.key
+                )
+                return
+            changes = self._hot.merge_user_facts_upsert(
+                context.tenant_id, context.user_id, [delta]
+            )
+            await self._audit_l1_changes(context, changes)
+        elif delta.source == "memory":
+            self._hot.apply_delta(context.tenant_id, context.user_id, delta)
+        else:
+            self._hot.apply_delta(context.tenant_id, context.user_id, delta)
         self._hot.invalidate_cache(context.tenant_id, context.user_id)
+
+    async def _audit_l1_changes(
+        self, context: RequestContext, changes: List[dict]
+    ) -> None:
+        if not changes or self._archive_db is None:
+            return
+        from agent_platform.memory.adapters.compliance_utils import (
+            append_audit_log,
+            content_sha256,
+        )
+
+        for change in changes:
+            await append_audit_log(
+                self._archive_db,
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                resource_type="l1_user",
+                resource_id=str(change.get("key") or ""),
+                content_hash=content_sha256(str(change.get("new") or "")),
+                action="upsert",
+                meta=change,
+            )
 
     async def update_prompt_memory(
         self,
@@ -425,6 +434,13 @@ class MemoryPortAdapter:
         delta: MemoryDelta,
         require_hitl: bool = True,
     ) -> None:
+        from app.agents.context_builder import is_allowed_l1_value
+
+        if not is_allowed_l1_value(delta.key, delta.value):
+            self._logger.warning(
+                "Rejected pending L1 key=%s (value not allowed)", delta.key
+            )
+            return
         if require_hitl:
             self._hot.queue_pending_delta(
                 context.tenant_id, context.user_id, delta
@@ -448,28 +464,22 @@ class MemoryPortAdapter:
             return "none"
         return type(self._cache).__name__
 
-    async def _cache_set(self, key: str, value: str) -> None:
+    async def _cache_set(
+        self, key: str, value: str, *, ttl_seconds: Optional[int] = None
+    ) -> None:
         if self._cache is None:
             return
         setter = getattr(self._cache, "set", None)
         if setter is None:
             return
-        result = setter(key, value, ttl_seconds=self._session_search_cache_ttl)
+        ttl = (
+            self._session_search_cache_ttl
+            if ttl_seconds is None
+            else ttl_seconds
+        )
+        result = setter(key, value, ttl_seconds=ttl)
         if hasattr(result, "__await__"):
             await result
-        # #region agent log
-        _session_search_cache_debug(
-            "A",
-            "memory_port_adapter._cache_set",
-            "session_search cache write",
-            {
-                "cache_adapter": self._cache_adapter_label(),
-                "cache_key": key,
-                "summary_len": len(value or ""),
-                "ttl_seconds": self._session_search_cache_ttl,
-            },
-        )
-        # #endregion
 
     def _session_search_cache_key(
         self,
@@ -497,7 +507,7 @@ class MemoryPortAdapter:
         return f"sess:{context.tenant_id}:{digest}"
 
     async def _invalidate_session_search_cache(
-        self, context: RequestContext
+        self, context: RequestContext, *, reason: str = "unknown"
     ) -> None:
         if self._cache is None:
             return
@@ -508,21 +518,6 @@ class MemoryPortAdapter:
         result = invalidator(pattern)
         if hasattr(result, "__await__"):
             result = await result
-        deleted = result if isinstance(result, int) else 0
-        if deleted > 0:
-            # #region agent log
-            _session_search_cache_debug(
-                "C",
-                "memory_port_adapter._invalidate_session_search_cache",
-                "session_search cache invalidated",
-                {
-                    "cache_adapter": self._cache_adapter_label(),
-                    "tenant_id": context.tenant_id,
-                    "pattern": pattern,
-                    "keys_deleted": deleted,
-                },
-            )
-            # #endregion
 
     def _filter_messages_by_acl(
         self, messages: List[dict], context: RequestContext
@@ -848,26 +843,9 @@ class MemoryPortAdapter:
             prefer_user_role=prefer_user_role,
         )
         cached = await self._cache_get(cache_key)
-        # #region agent log
-        _session_search_cache_debug(
-            "A" if cached else "B",
-            "memory_port_adapter.session_search",
-            "session_search cache lookup",
-            {
-                "cache_hit": bool(cached),
-                "cache_adapter": self._cache_adapter_label(),
-                "cache_key": cache_key,
-                "query_preview": (query or "")[:80],
-                "scope": scope,
-                "limit": limit,
-                "session_id": context.session_id,
-                "tenant_id": context.tenant_id,
-                "user_id": context.user_id,
-                "summary_len": len(cached or "") if cached else 0,
-            },
-        )
-        # #endregion
-        if cached:
+        if cached is not None:
+            if cached == SESSION_SEARCH_EMPTY_SENTINEL:
+                return ""
             return cached
 
         try:
@@ -880,18 +858,12 @@ class MemoryPortAdapter:
                 prefer_user_role=prefer_user_role,
             )
             if not detail.fragments:
-                # #region agent log
-                _session_search_cache_debug(
-                    "E",
-                    "memory_port_adapter.session_search",
-                    "session_search no fragments — skip cache write",
-                    {
-                        "cache_adapter": self._cache_adapter_label(),
-                        "cache_key": cache_key,
-                        "query_preview": (query or "")[:80],
-                    },
-                )
-                # #endregion
+                if self._session_search_negative_cache_ttl > 0:
+                    await self._cache_set(
+                        cache_key,
+                        SESSION_SEARCH_EMPTY_SENTINEL,
+                        ttl_seconds=self._session_search_negative_cache_ttl,
+                    )
                 return ""
             await self._cache_set(cache_key, detail.summary)
             return detail.summary
@@ -972,7 +944,8 @@ class MemoryPortAdapter:
                     session_id=session_id or "reindex",
                     trace_id="reindex",
                     channel="system",
-                )
+                ),
+                reason="reindex",
             )
 
         marker = getattr(self._vector_index, "mark_index_current", None)
@@ -1313,7 +1286,7 @@ class MemoryPortAdapter:
             trace_id="purge",
             channel="system",
         )
-        await self._invalidate_session_search_cache(ctx)
+        await self._invalidate_session_search_cache(ctx, reason="purge")
         return summary
 
     async def backfill_cold_search_index(
@@ -1425,8 +1398,9 @@ class MemoryPortAdapter:
         self._hot.invalidate_cache(tenant_id, user_id)
 
     def health(self) -> dict:
-        return {
-            "status": "healthy",
+        status = "healthy"
+        out: dict = {
+            "status": status,
             "store_dir": str(self._hot.store_dir),
             "archive_db": "configured" if self._archive_db else "not_configured",
             "skill_memory": "configured" if self._skill_memory else "not_configured",
@@ -1444,3 +1418,16 @@ class MemoryPortAdapter:
             ),
             "cold_archive_keep_vectors": self._cold_archive_keep_vectors,
         }
+        if self._cold_archive is not None:
+            store = getattr(self._cold_archive, "_store", None)
+            if store is not None and hasattr(store, "health"):
+                try:
+                    raw = store.health()
+                    store_health = raw if isinstance(raw, dict) else {"status": "unknown"}
+                    out["object_store"] = store_health
+                    if store_health.get("status") not in ("healthy", "skipped"):
+                        out["status"] = "degraded"
+                except Exception as exc:
+                    out["object_store"] = {"status": "unhealthy", "error": str(exc)}
+                    out["status"] = "degraded"
+        return out

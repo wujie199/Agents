@@ -13,12 +13,14 @@ pip install -e ".[api,langgraph]"
 启动：
 
 ```bash
-# 开发 profile（默认）
+# 开发 profile（默认，记忆 config/memory.yml 开箱即用，无需 MEMORY_CONFIG）
 uvicorn app.api.chat_server:app --reload --port 8080
 
 # 生产 profile
 python -m app.api.chat_server --port 8080 --profile production
 ```
+
+dev 创建会话时自动 `bootstrap_memory_runtime`（目录、L4 seed、ensure_session、向量 reindex）。
 
 ### 鉴权（可选）
 
@@ -54,6 +56,8 @@ curl -H 'X-API-Key: your-secret' ...
 | POST | `/v1/memory/sessions` | L2 会话列表 |
 | POST | `/v1/memory/pending` | pending L1 |
 | POST | `/v1/memory/confirm` | 确认 pending L1 |
+| POST | `/v1/memory/l4/refresh` | 刷新 L4 外部画像缓存（不写入 L1） |
+| GET | `/v1/memory/runtime` | 记忆子系统运行状态（L1/L2/L3/L4 摘要） |
 | POST | `/v1/memory/purge/user` | 删除用户数据（需 `confirm=true`） |
 | POST | `/v1/memory/purge/tenant/l3` | 删除租户 L3 技能数据（需 `confirm=true`） |
 | POST | `/v1/memory/purge/tenant/l4` | 删除租户 L4 画像（需 `confirm=true`） |
@@ -108,8 +112,10 @@ export CHAT_RATE_LIMIT_REDIS_URL=redis://localhost:6379/0
 | `REDIS_URL` / `REDIS_HOST` | **dev/production 均使用 Redis 缓存**（默认 `localhost:6379`；前缀 `CHAT_CACHE_REDIS_PREFIX`，默认 `agents`） |
 | `CHAT_RATE_LIMIT_REDIS_URL` | 限流 Redis（未设时用 `REDIS_URL` 的 db/1，与缓存 db/0 分离） |
 | `USE_MEMORY_GRAPH` | production：`false` 用 Neo4j（默认 false）；`true` 用内存图 |
-| `MEMORY_CONFIG` | 记忆配置路径；production profile 未设时自动用 `memory.production.example.yml` |
+| `MEMORY_CONFIG` | 记忆配置路径；**dev 默认 `config/memory.yml`（全开）**；production 未设时自动用 `memory.production.example.yml` |
 | `MEMORY_ADMIN_API_KEY` | purge/retention 专用 Key（默认同 `CHAT_API_KEY`） |
-| `RAG_TENANT_ID` | RAG 检索 tenant（默认 `default`） |
+| `RAG_TENANT_ID` | RAG 检索 tenant（显式覆盖；未设时 dev 对齐 `tenant_id`，见 [TENANT.md](../document/memory/TENANT.md)） |
+| `RAG_LEGACY_DEFAULT` | dev 下存在旧离线索引时是否回退 `default`（默认 `true`） |
+| `AGENT_DEBUG` / `MEMORY_RUNTIME_DEBUG` | 开启 Agent / 记忆 NDJSON 调试 trace |
 | `CHAT_API_KEY` | API Key（可选） |
 | `CHAT_RATE_LIMIT_REDIS_URL` | 分布式限流 Redis URL（可选） |

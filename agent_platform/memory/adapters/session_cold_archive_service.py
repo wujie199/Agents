@@ -32,6 +32,15 @@ class SessionColdArchiveService:
         self._encryption_key = encryption_key
         self._logger = logging.getLogger(__name__)
 
+    def health(self) -> dict:
+        if self._store is None:
+            return {"status": "not_configured"}
+        if hasattr(self._store, "health"):
+            raw = self._store.health()
+            if isinstance(raw, dict):
+                return raw
+        return {"status": "unknown", "type": type(self._store).__name__}
+
     @staticmethod
     def _archive_id(session_id: str) -> str:
         return hashlib.sha256(f"cold:{session_id}".encode()).hexdigest()[:16]

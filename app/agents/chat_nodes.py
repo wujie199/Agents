@@ -29,8 +29,10 @@ from app.agents.memory_runtime_debug import (
     trace_layer_trigger,
 )
 from app.agents.context_builder import is_name_intro_query
+from app.agents.name_remember import auto_remember_name_intro
 from app.agents.prompt_builder import (
     PROFILE_NAME_HINT,
+    SKILL_TOOL_HINT,
     RECALL_TOOL_HINT,
     build_chat_messages,
     filter_evidence_bundle,
@@ -68,7 +70,6 @@ async def retrieve_rag_bundle(
     *,
     plan: Optional[dict] = None,
 ) -> EvidenceBundle:
-    # #region agent log
     agent_debug(
         "RAG-C",
         "chat_nodes.retrieve_rag_bundle:entry",
@@ -80,29 +81,32 @@ async def retrieve_rag_bundle(
             "session_id": getattr(ctx.request, "session_id", None),
         },
     )
-    # #endregion
     if ctx.rag is None:
         trace_layer_trigger(ctx, "RAG", "route_and_retrieve", False, "rag_not_configured")
         bundle = EvidenceBundle.empty_bundle(
             DegradedReason.VECTOR_UNAVAILABLE,
             "rag_not_configured",
         )
-        # #region agent log
         agent_debug(
             "RAG-C",
             "chat_nodes.retrieve_rag_bundle:no_port",
             "RAGPort 未注入",
             {"empty": True, "error_code": "rag_not_configured"},
         )
-        # #endregion
         return bundle
     rag_tenant = (getattr(ctx, "extra", None) or {}).get("rag_tenant_id")
+    if not rag_tenant:
+        from app.agents.context_factory import resolve_rag_tenant_id
+
+        _data_dir = (getattr(ctx, "extra", None) or {}).get("data_dir") or "data"
+        rag_tenant = resolve_rag_tenant_id(
+            ctx.request, profile="dev", data_dir=str(_data_dir)
+        )
     rag_request = (
         replace(ctx.request, tenant_id=rag_tenant)
         if rag_tenant and rag_tenant != ctx.request.tenant_id
         else ctx.request
     )
-    # #region agent log
     agent_debug(
         "RAG-C",
         "chat_nodes.retrieve_rag_bundle:tenant",
@@ -113,7 +117,6 @@ async def retrieve_rag_bundle(
             "chroma_dir": (getattr(ctx, "extra", None) or {}).get("rag_chroma_dir"),
         },
     )
-    # #endregion
     import time as _time
 
     _rag_t0 = _time.perf_counter()
@@ -124,7 +127,6 @@ async def retrieve_rag_bundle(
         (_time.perf_counter() - _rag_t0) * 1000,
         evidence_count=len(bundle.evidences or []),
     )
-    # #region agent log
     agent_debug(
         "RAG-D",
         "chat_nodes.retrieve_rag_bundle:result",
@@ -149,7 +151,6 @@ async def retrieve_rag_bundle(
             "plan_mode": (bundle.plan or {}).get("mode"),
         },
     )
-    # #endregion
     return bundle
 
 
@@ -181,7 +182,6 @@ async def build_turn_messages(
             "chars": len(snap.memory_text or ""),
         },
     )
-    # #region agent log
     agent_debug(
         "MEM-L1",
         "chat_nodes.build_turn_messages:l1",
@@ -192,7 +192,6 @@ async def build_turn_messages(
             "memory_preview": (snap.memory_text or "")[:400],
         },
     )
-    # #endregion
 
     history = await perf_await(
         ctx,
@@ -229,6 +228,16 @@ async def build_turn_messages(
     )
     if isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra["retrieval_intent"] = retrieval_plan.intent
+
+    pending_remember = await auto_remember_name_intro(
+        ctx,
+        user_message,
+        cfg,
+        intent=retrieval_plan.intent,
+    )
+    if pending_remember and isinstance(getattr(ctx, "extra", None), dict):
+        ctx.extra["pending_remember"] = pending_remember
+    from app.agents.memory_views import list_pending_l1_deltas
 
     parallel_rag = (
         enable_rag
@@ -273,7 +282,6 @@ async def build_turn_messages(
         "检索编排计划",
         retrieval_plan.to_debug_dict(),
     )
-    # #region agent log
     agent_debug(
         "MEM-L2-HIST",
         "chat_nodes.build_turn_messages:history",
@@ -293,7 +301,6 @@ async def build_turn_messages(
             ],
         },
     )
-    # #endregion
 
     evidence_text = ""
     run_rag = enable_rag and retrieval_plan.run_rag
@@ -400,16 +407,13 @@ async def build_turn_messages(
         )
     else:
         trace_layer_trigger(ctx, "RAG", "retrieve", False, "enable_rag=false")
-        # #region agent log
         agent_debug(
             "RAG-SKIP",
             "chat_nodes.build_turn_messages:rag_off",
             "RAG 已关闭 (--no-rag)",
             {"enable_rag": False},
         )
-        # #endregion
 
-    # #region agent log
     agent_debug(
         "RAG-D",
         "chat_nodes.build_turn_messages:evidence_text",
@@ -419,7 +423,6 @@ async def build_turn_messages(
             "evidence_preview": evidence_text[:300] if evidence_text else "",
         },
     )
-    # #endregion
 
     tool_hints = ""
     if (
@@ -436,6 +439,15 @@ async def build_turn_messages(
         and is_name_intro_query(user_message)
     ):
         tool_hints = PROFILE_NAME_HINT
+        if pending_remember:
+            tool_hints += (
+                f"\n【系统】已自动加入待确认记忆：{pending_remember}。"
+                "请向用户说明可用 /confirm 确认写入 L1。"
+            )
+    elif cfg.enable_skill_tools and retrieval_plan.intent == "skill":
+        tool_hints = SKILL_TOOL_HINT
+        if session_context and "【可用技能】" in session_context:
+            tool_hints += "\n【系统】技能候选已注入上下文，优先选用上方列表中的 skill_id。"
 
     messages = build_chat_messages(
         memory_system=sanitize_memory_text_for_chat(snap.memory_text),
@@ -446,14 +458,12 @@ async def build_turn_messages(
         tool_hints=tool_hints,
     )
     ev_count = len(bundle.evidences) if bundle and bundle.evidences else 0
-    # #region agent log
     agent_debug(
         "PROMPT",
         "chat_nodes.build_turn_messages:assembled",
         "最终 LLM messages 组装",
         summarize_messages(messages),
     )
-    # #endregion
     log_layer_trigger_summary(
         ctx,
         user_message=user_message,
@@ -463,57 +473,77 @@ async def build_turn_messages(
             "evidence_chars": len(evidence_text),
         },
     )
-    # #region agent log
     _summary_part = ""
     if session_context and "【更早对话摘要】" in session_context:
         _si = session_context.find("【更早对话摘要】")
         _rest = session_context[_si:]
         _next = _rest.find("\n\n【", len("【更早对话摘要】"))
         _summary_part = _rest[:_next] if _next > 0 else _rest
-    from app.agents.memory_runtime_debug import chat_config_verify_snapshot, trace_write
+    from app.agents.memory_runtime_debug import (
+        chat_config_verify_snapshot,
+        is_memory_runtime_debug,
+        trace_write,
+    )
 
-    trace_write(
-        hypothesis_id="VERIFY-R2",
-        location="chat_nodes.build_turn_messages:verify",
-        message="round2 per-turn verification",
-        data={
-            "query_preview": (user_message or "")[:80],
+    if is_memory_runtime_debug():
+        trace_write(
+            hypothesis_id="VERIFY-R2",
+            location="chat_nodes.build_turn_messages:verify",
+            message="per-turn verification",
+            data={
+                "query_preview": (user_message or "")[:80],
+                "intent": retrieval_plan.intent,
+                "channels": retrieval_plan.to_debug_dict().get("channels"),
+                "run_session_search": retrieval_plan.run_session_search,
+                "run_rag_planned": retrieval_plan.run_rag,
+                "run_rag_actual": bool(run_rag and bundle),
+                "run_l4": retrieval_plan.run_l4,
+                "recall_prefetch_hit": session_ctx.recall_prefetch_hit,
+                "has_session_search_block": any(
+                    marker in (session_context or "")
+                    for marker in (
+                        "【会话回忆检索】",
+                        "【跨会话回忆检索】",
+                        "【会话相关检索】",
+                        "【跨会话相关】",
+                    )
+                ),
+                "has_recall_block": any(
+                    marker in (session_context or "")
+                    for marker in (
+                        "【会话回忆检索】",
+                        "【跨会话回忆检索】",
+                        "【会话相关检索】",
+                        "【跨会话相关】",
+                    )
+                ),
+                "has_l4_block": "【外部画像 L4】" in (session_context or ""),
+                "summary_has_assistant": "assistant:" in _summary_part.lower(),
+                "summary_user_only_cfg": cfg.rolling_summary_user_only,
+                "has_grounding_rules": "【回答约束】" in evidence_text,
+                "has_tool_hints": bool(tool_hints),
+                "config": chat_config_verify_snapshot(cfg),
+            },
+            run_id=getattr(ctx.request, "session_id", None) or "default",
+        )
+    from app.agents.memory_metrics import record_turn_decision
+    from app.agents.retrieval_router import should_use_direct_llm_for_intent
+
+    record_turn_decision(
+        ctx,
+        {
             "intent": retrieval_plan.intent,
             "channels": retrieval_plan.to_debug_dict().get("channels"),
-            "run_session_search": retrieval_plan.run_session_search,
-            "run_rag_planned": retrieval_plan.run_rag,
-            "run_rag_actual": bool(run_rag and bundle),
-            "run_l4": retrieval_plan.run_l4,
+            "skip_rag_reason": retrieval_plan.skip_rag_reason,
             "recall_prefetch_hit": session_ctx.recall_prefetch_hit,
-            "has_session_search_block": any(
-                marker in (session_context or "")
-                for marker in (
-                    "【会话回忆检索】",
-                    "【跨会话回忆检索】",
-                    "【会话相关检索】",
-                    "【跨会话相关】",
-                )
+            "run_rag": bool(run_rag),
+            "evidence_count": ev_count,
+            "direct_llm": should_use_direct_llm_for_intent(
+                retrieval_plan.intent, cfg
             ),
-            "has_recall_block": any(
-                marker in (session_context or "")
-                for marker in (
-                    "【会话回忆检索】",
-                    "【跨会话回忆检索】",
-                    "【会话相关检索】",
-                    "【跨会话相关】",
-                )
-            ),
-            "has_l4_block": "【外部画像 L4】" in (session_context or ""),
-            "summary_has_assistant": "assistant:" in _summary_part.lower(),
-            "summary_user_only_cfg": cfg.rolling_summary_user_only,
-            "has_grounding_rules": "【回答约束】" in evidence_text,
-            "has_tool_hints": bool(tool_hints),
-            "config": chat_config_verify_snapshot(cfg),
+            "pending_remember": (ctx.extra or {}).get("pending_remember"),
         },
-        run_id=getattr(ctx.request, "session_id", None) or "default",
-        force=True,
     )
-    # #endregion
     return messages, ev_count, bundle.empty if bundle else True, snap.hash
 
 
@@ -557,7 +587,6 @@ async def persist_user_and_assistant(
     pending = 0
     if buf is not None and hasattr(buf, "pending_turns_for"):
         pending = len(buf.pending_turns_for(ctx.request))
-    # #region agent log
     agent_debug(
         "MEM-L2-PERSIST",
         "chat_nodes.persist_user_and_assistant",
@@ -578,4 +607,3 @@ async def persist_user_and_assistant(
             ],
         },
     )
-    # #endregion

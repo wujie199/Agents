@@ -34,9 +34,11 @@ python document/query_memory.py purge-tenant-l3 --tenant tenant1
 
 ## 配置（`config/memory.yml`）
 
+dev 默认已开启 skill 自动草稿；生产可用 `MEMORY_CONFIG=config/memory.production.example.yml` 覆盖。
+
 ```yaml
 skills_meta_dir: skills/meta
-skill_auto_extract_draft: false   # 成功后自动写草稿（仍须 publish）
+skill_auto_extract_draft: true    # dev 默认 true；成功后自动写草稿（仍须 publish）
 skill_deprecate_threshold: 0.2    # 低于此 success_rate 自动 deprecated
 skill_include_deprecated_in_search: false
 skill_auto_extract_min_steps: 2

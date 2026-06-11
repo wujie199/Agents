@@ -46,6 +46,7 @@ from app.agents.memory_metrics import (
 )
 from app.api.rate_limit import create_chat_rate_limiter
 from app.agents.context_factory import ChatProfile, build_chat_run_context
+from app.agents.memory_bootstrap import bootstrap_memory_runtime
 from app.agents.react_loop import end_agent_session
 
 try:
@@ -132,7 +133,7 @@ class ChatSessionRegistry:
             if key in self._sessions:
                 return self._sessions[key]
 
-            chat_cfg = load_chat_config(self.config_dir)
+            chat_cfg = load_chat_config(self.config_dir, profile=self.profile)
             if not self.enable_memory_tools:
                 chat_cfg = replace(chat_cfg, enable_memory_tools=False)
 
@@ -150,7 +151,12 @@ class ChatSessionRegistry:
                 data_dir=self.data_dir,
             )
             run_ctx = replace(run_ctx, observability=self.observability)
-            await run_ctx.require_memory().ensure_session(request)
+            await bootstrap_memory_runtime(
+                run_ctx,
+                data_dir=self.data_dir,
+                config_dir=self.config_dir,
+                profile=self.profile,
+            )
 
             handle = ChatSessionHandle(run_ctx=run_ctx, chat_cfg=chat_cfg)
             if engine == "langgraph":

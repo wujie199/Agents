@@ -12,6 +12,7 @@ from core.ports.memory import ToolCallRecord, TurnRecord
 from agent_platform.memory.adapters.turn_buffer import TurnBuffer
 
 from app.agents.chat_config import ChatAgentConfig, load_chat_config
+from app.agents.debug_trace import agent_debug
 from app.agents.session_finalize import enrich_l1_before_finalize
 
 
@@ -129,7 +130,7 @@ async def end_agent_session(
     flush_buffer: Optional[TurnBuffer] = None,
     checkpoint_state: Optional[dict] = None,
     chat_cfg: Optional[ChatAgentConfig] = None,
-) -> None:
+) -> dict:
     buf = flush_buffer if flush_buffer is not None else ctx.turn_buffer
     if buf is not None:
         await buf.flush()
@@ -163,9 +164,6 @@ async def end_agent_session(
             metadata={"status": status},
         )
 
-    # #region agent log
-    from app.agents.debug_trace import agent_debug
-
     agent_debug(
         "FINALIZE",
         "react_loop.end_agent_session:before",
@@ -178,9 +176,8 @@ async def end_agent_session(
             "had_checkpoint": checkpoint_state is not None,
         },
     )
-    # #endregion
     cfg = chat_cfg or load_chat_config()
-    await enrich_l1_before_finalize(ctx, cfg)
+    l1_extract_pending = await enrich_l1_before_finalize(ctx, cfg)
     from app.agents.memory_runtime_debug import (
         is_memory_runtime_debug,
         log_memory_runtime_status,
@@ -188,6 +185,18 @@ async def end_agent_session(
 
     if is_memory_runtime_debug():
         await log_memory_runtime_status(ctx, event="finalize_before_end")
-    await ctx.require_memory().end_session(
+    summary = await ctx.require_memory().end_session(
         ctx.request, status=status, finalize=True
     )
+    if not isinstance(summary, dict):
+        summary = {}
+    summary["l1_extract_pending"] = l1_extract_pending
+    if isinstance(getattr(ctx, "extra", None), dict):
+        ctx.extra["finalize_summary"] = summary
+    agent_debug(
+        "FINALIZE",
+        "react_loop.end_agent_session:done",
+        "finalize 完成",
+        summary,
+    )
+    return summary

@@ -18,9 +18,9 @@ from app.agents.memory_metrics import get_memory_metric_stats
 from app.agents.memory_views import list_pending_l1_deltas
 
 _DEBUG_LOG_DEFAULT = str(
-    Path(__file__).resolve().parents[2] / ".cursor" / "debug-d0a1fc.log"
+    Path(__file__).resolve().parents[2] / ".cursor" / "memory_runtime.ndjson"
 )
-_SESSION_ID = os.environ.get("MEMORY_DEBUG_SESSION", "d0a1fc")
+_SESSION_ID = os.environ.get("MEMORY_DEBUG_SESSION", "default")
 _ENABLED = os.environ.get("MEMORY_RUNTIME_DEBUG", "").lower() in (
     "1",
     "true",
@@ -61,14 +61,15 @@ def resolve_memory_trace(
 ) -> tuple[bool, bool]:
     """解析是否开启 trace 及是否打印控制台 debug。返回 (trace_on, console_debug)。"""
     env = os.environ.get("MEMORY_RUNTIME_DEBUG", "").lower()
+    agent_env = os.environ.get("AGENT_DEBUG", "").lower()
     if no_debug or env in ("0", "false", "no", "off"):
         return False, False
     if env in ("1", "true", "yes", "on"):
         return True, debug and not debug_quiet
+    if agent_env in ("1", "true", "yes", "on"):
+        return True, debug and not debug_quiet
     if debug or debug_quiet:
         return True, debug and not debug_quiet
-    if profile == "dev":
-        return True, False
     return False, False
 
 
@@ -81,6 +82,7 @@ def chat_config_verify_snapshot(cc: Any) -> dict[str, Any]:
         "max_history_chars": cc.max_history_chars,
         "enable_memory_tools": cc.enable_memory_tools,
         "remember_require_hitl": cc.remember_require_hitl,
+        "auto_confirm_pending_on_exit": cc.auto_confirm_pending_on_exit,
         "enable_l1_extract_on_finalize": cc.enable_l1_extract_on_finalize,
         "l1_extract_allowed_keys": list(cc.l1_extract_allowed_keys),
         "interactive_flush_buffer": cc.interactive_flush_buffer,
@@ -165,7 +167,6 @@ def perf_mark(
         message="stage timing",
         data=entry,
         run_id=_perf_run_id(ctx),
-        force=True,
     )
 
 
@@ -242,8 +243,13 @@ def perf_finish_turn(
             **(extra or {}),
         },
         run_id=_perf_run_id(ctx),
-        force=True,
     )
+    try:
+        from app.agents.memory_metrics import record_turn_latency
+
+        record_turn_latency(ctx, total_ms)
+    except Exception:
+        pass
     ctx.extra.pop("turn_perf", None)
 
 
@@ -263,8 +269,8 @@ def trace_layer_trigger(
     run_id: str = "default",
 ) -> None:
     """记录单层记忆/RAG 是否触发（写入 NDJSON + 累积到 ctx.extra）。"""
-    if not _ENABLED:
-        return
+    from app.agents.agent_pipeline_debug import pipeline_debug_enabled, pipeline_debug_log
+
     entry = {
         "layer": layer,
         "action": action,
@@ -277,6 +283,19 @@ def trace_layer_trigger(
         triggers = ctx.extra.setdefault("layer_triggers", [])
         triggers.append(entry)
         run_id = getattr(ctx.request, "session_id", run_id)
+    if pipeline_debug_enabled():
+        pipeline_debug_log(
+            component=layer,
+            stage=action,
+            status="ON" if triggered else "SKIP",
+            location=f"layer_trace.{layer}.{action}",
+            message=reason or ("triggered" if triggered else "skipped"),
+            data={"triggered": triggered, "reason": reason, **(data or {})},
+            run_id=run_id,
+            hypothesis_id=f"TRIGGER-{layer}",
+        )
+    if not _ENABLED:
+        return
     trace_write(
         hypothesis_id=f"TRIGGER-{layer}",
         location=f"layer_trace.{layer}.{action}",
@@ -295,7 +314,7 @@ def format_layer_triggers(ctx: RunContext | None) -> str:
     if ctx is not None:
         triggers = list((ctx.extra or {}).get("layer_triggers") or [])
     if not triggers:
-        return "（本轮暂无 layer_triggers，请发一条消息或加 --debug）"
+        return "（本轮暂无 layer_triggers，请先发送一条消息）"
     lines = ["── 本轮 L1-L4 / RAG 触发链 ──"]
     for i, t in enumerate(triggers, 1):
         flag = "✓" if t.get("triggered") else "✗"
@@ -310,6 +329,30 @@ def format_layer_triggers(ctx: RunContext | None) -> str:
                 preview = preview[:120] + "…"
             lines.append(f"       {preview}")
     lines.append(f"  log → {debug_log_path()}")
+    if ctx is not None:
+        perf = (ctx.extra or {}).get("turn_perf") or {}
+        stages = list(perf.get("stages") or [])
+        if stages:
+            ranked = sorted(
+                stages,
+                key=lambda s: float(s.get("duration_ms") or 0),
+                reverse=True,
+            )[:3]
+            lines.append("── 耗时 Top3（ms）──")
+            for row in ranked:
+                lines.append(
+                    f"  · {row.get('stage')}: {row.get('duration_ms')}ms"
+                )
+        decision = (ctx.extra or {}).get("turn_decision")
+        if isinstance(decision, dict):
+            lines.append("── 本轮决策 ──")
+            lines.append(
+                f"  intent={decision.get('intent')} "
+                f"rag={decision.get('run_rag')} "
+                f"recall_hit={decision.get('recall_prefetch_hit')}"
+            )
+            if decision.get("skip_rag_reason"):
+                lines.append(f"  skip_rag={decision.get('skip_rag_reason')}")
     return "\n".join(lines)
 
 
@@ -320,6 +363,15 @@ def log_layer_trigger_summary(
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
     """一轮 build_turn 结束：汇总触发链写入 NDJSON。"""
+    from app.agents.agent_pipeline_debug import (
+        log_turn_pipeline_summary,
+        pipeline_debug_enabled,
+    )
+
+    if pipeline_debug_enabled():
+        log_turn_pipeline_summary(ctx, user_message=user_message, extra=extra)
+    if not _ENABLED:
+        return
     triggers = list((ctx.extra or {}).get("layer_triggers") or [])
     summary = {
         "user_preview": _preview(user_message, 120),

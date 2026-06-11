@@ -90,8 +90,11 @@ def _plan_from_intent(
             and is_l4_query(query)
         ):
             run_l4 = True
-    elif intent == "skill" and cfg.skill_prefetch and cfg.enable_skill_tools:
-        run_skill = True
+    elif intent == "skill":
+        if cfg.skill_prefetch and cfg.enable_skill_tools:
+            run_skill = True
+        skip_rag = "skill_intent"
+        skip_recall = "skill_intent"
     elif intent == "profile":
         if cfg.l4_profile_prefetch and cfg.enable_l4_tools:
             run_l4 = True

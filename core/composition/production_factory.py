@@ -197,6 +197,9 @@ def _build_memory_port(
         hot_memory_max_chars=cfg.get("hot_memory_max_chars", 2200),
         user_memory_max_chars=cfg.get("user_memory_max_chars", 1375),
         session_search_cache_ttl=cfg.get("session_search_cache_ttl", 900),
+        session_search_negative_cache_ttl=cfg.get(
+            "session_search_negative_cache_ttl", 120
+        ),
         retention_days=cfg.get("retention_days", 90),
         session_vector_index=session_vector_index,
         session_hybrid_search=cfg.get("session_hybrid_search", True),
@@ -481,7 +484,7 @@ def build_development_context(
             "object_store": object_store,
             "vector_port": vector_port,
             "rag_chroma_dir": chroma_dir,
-            "rag_tenant_id": "default",
+            "rag_tenant_id": None,
             "data_dir": data_dir,
         }
     )

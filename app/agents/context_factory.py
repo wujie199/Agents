@@ -27,14 +27,31 @@ def resolve_rag_tenant_id(
     request: RequestContext,
     *,
     profile: ChatProfile = "dev",
+    data_dir: str | None = None,
 ) -> str:
-    """RAG 索引 tenant：env 优先；production 对齐 memory tenant；dev 默认 default（兼容现有 chroma）。"""
+    """
+    RAG 索引 tenant：env 优先；production/dev 默认对齐 memory tenant。
+    dev 若存在离线 chroma 且 RAG_LEGACY_DEFAULT!=false，回退 default 以兼容旧索引。
+    """
     env_tenant = (os.environ.get("RAG_TENANT_ID") or "").strip()
     if env_tenant:
         return env_tenant
+    preferred = request.tenant_id
     if profile == "production":
-        return request.tenant_id
-    return "default"
+        return preferred
+    if preferred == "default":
+        return preferred
+    legacy_ok = os.environ.get("RAG_LEGACY_DEFAULT", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if legacy_ok and data_dir:
+        chroma_dir, _ = _resolve_dev_rag_paths(data_dir)
+        chroma_path = Path(chroma_dir)
+        if chroma_path.is_dir() and any(chroma_path.iterdir()):
+            return "default"
+    return preferred
 
 
 def build_chat_run_context(
@@ -54,9 +71,8 @@ def build_chat_run_context(
             use_memory_graph=_env_bool("USE_MEMORY_GRAPH", False),
         )
         extra = dict(ctx.extra or {})
-        extra.setdefault(
-            "rag_tenant_id",
-            resolve_rag_tenant_id(request, profile="production"),
+        extra["rag_tenant_id"] = resolve_rag_tenant_id(
+            request, profile="production"
         )
         extra.setdefault("rag_chroma_dir", f"{data_dir}/chroma")
         extra["data_dir"] = data_dir
@@ -85,9 +101,8 @@ def build_chat_run_context(
     chroma_dir, _ = _resolve_dev_rag_paths(data_dir)
     extra = dict(ctx.extra or {})
     extra.setdefault("rag_chroma_dir", chroma_dir)
-    extra.setdefault(
-        "rag_tenant_id",
-        resolve_rag_tenant_id(request, profile="dev"),
+    extra["rag_tenant_id"] = resolve_rag_tenant_id(
+        request, profile="dev", data_dir=data_dir
     )
     extra["data_dir"] = data_dir
     extra["langgraph_checkpoint_path"] = str(

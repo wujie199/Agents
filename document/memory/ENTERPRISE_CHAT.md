@@ -1,5 +1,18 @@
 # 企业级记忆 + Chat 接入
 
+## 0. 开发默认（开箱即用）
+
+```bash
+python app/chat_repl.py --tenant tenant1 --user user1 --session chat1
+```
+
+- **记忆**：`config/memory.yml` 默认开启向量(mock)、冷归档、L4 file、skill draft；**无需** `MEMORY_CONFIG`
+- **启动 bootstrap**：自动创建目录、L4 seed、ensure_session、当前会话向量 reindex
+- **Chat dev profile**（`config/chat.yml` → `profiles.dev`）：`remember_require_hitl: false`；退出 REPL 时 `auto_confirm_pending_on_exit: true` 自动确认剩余 pending
+- **RAG 租户**：见 [TENANT.md](./TENANT.md)
+
+REPL 额外命令：`/refresh-profile`（L4 缓存刷新）、`/debug-memory`（需 `--debug` 或 `MEMORY_RUNTIME_DEBUG=1` 写 trace）。
+
 ## 1. 生产配置
 
 ```bash
@@ -39,6 +52,8 @@ Context 预检索：`session_search_prefetch_scope`（auto/session/user）、`sk
 | L1 快照 | `/snapshot` | `POST /v1/chat/snapshot` |
 | pending L1 | `/pending` | `POST /v1/memory/pending` |
 | 确认 L1 | `/confirm` | `POST /v1/memory/confirm` |
+| L4 画像刷新 | `/refresh-profile` | `POST /v1/memory/l4/refresh` |
+| 运行状态 | `/debug-memory` | `GET /v1/memory/runtime` |
 | L2 会话列表 | `/sessions` | `POST /v1/memory/sessions` |
 | 记忆状态 | `/status` | `POST /v1/memory/status` |
 | 用户数据删除 | — | `POST /v1/memory/purge/user` |

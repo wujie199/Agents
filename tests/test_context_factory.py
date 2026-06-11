@@ -21,7 +21,8 @@ def _request() -> RequestContext:
     )
 
 
-def test_build_chat_run_context_dev():
+def test_build_chat_run_context_dev(monkeypatch):
+    monkeypatch.setenv("RAG_LEGACY_DEFAULT", "false")
     with patch(
         "app.agents.context_factory.build_development_context"
     ) as mock_dev:
@@ -30,7 +31,7 @@ def test_build_chat_run_context_dev():
         mock_dev.return_value = RunContext(request=_request(), extra={})
         ctx = build_chat_run_context(_request(), profile="dev", data_dir="data")
         mock_dev.assert_called_once()
-        assert ctx.extra.get("rag_tenant_id") == "default"
+        assert ctx.extra.get("rag_tenant_id") == "t"
         assert "rag_chroma_dir" in ctx.extra
 
 
@@ -45,7 +46,7 @@ def test_build_chat_run_context_production():
             _request(), profile="production", data_dir="data"
         )
         mock_prod.assert_called_once()
-        assert ctx.extra.get("rag_tenant_id") == "default"
+        assert ctx.extra.get("rag_tenant_id") == "t"
         assert ctx.extra.get("rag_chroma_dir") == "data/chroma"
 
 

@@ -1,0 +1,56 @@
+# 记忆 E2E 场景基线（MVP 第一期）
+# 测试以单元/集成方式验证路由与策略，不依赖真实 LLM。
+
+scenarios:
+  - id: name_intro_hitl
+    query: "叫武杰"
+    expect_intent: profile
+    expect_name: "武杰"
+    expect_l1_key: 姓名
+    description: 姓名自述 → profile intent + HITL pending
+
+  - id: name_intro_nihao
+    query: "我叫李明"
+    expect_intent: profile
+    expect_name: "李明"
+
+  - id: recall_session
+    query: "之前我们聊过什么"
+    expect_intent: recall
+    expect_session_search: true
+    expect_rag_default: false
+
+  - id: knowledge_rag
+    query: "扫地机器人有什么优点"
+    expect_intent: knowledge
+    expect_rag: true
+    expect_session_search: true
+
+  - id: chitchat_skip_rag
+    query: "你好"
+    expect_intent: chitchat
+    expect_rag: false
+
+  - id: profile_who_am_i
+    query: "你知道我的名字吗"
+    expect_intent: profile
+    expect_rag: false
+
+  - id: cross_session_recall
+    query: "别的会话里说过什么"
+    expect_intent: recall
+    expect_scope: user
+
+  - id: remember_explicit
+    query: "记住我喜欢 JSON 输出"
+    expect_intent: knowledge
+    note: 显式 remember 由工具/ReAct 处理；路由可能为 knowledge
+
+  - id: skill_json_section
+    query: "用 json_section 技能处理"
+    expect_intent: skill
+    expect_rag: false
+
+  - id: skill_workflow
+    query: "执行 report_context 流程"
+    expect_intent: skill

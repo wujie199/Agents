@@ -293,15 +293,20 @@ class HotMemoryFileAdapter:
     def queue_pending_delta(
         self, tenant_id: str, user_id: str, delta: MemoryDelta
     ) -> None:
+        """HITL pending：同 key 以最后一次为准（去重 upsert）。"""
+        merged: dict[str, MemoryDelta] = {
+            d.key: d for d in self.list_pending_deltas(tenant_id, user_id)
+        }
+        merged[delta.key] = delta
         path = self._pending_path(tenant_id, user_id)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(
-                json.dumps(
-                    {"key": delta.key, "value": delta.value, "source": delta.source},
-                    ensure_ascii=False,
-                )
-                + "\n"
+        lines = [
+            json.dumps(
+                {"key": d.key, "value": d.value, "source": d.source},
+                ensure_ascii=False,
             )
+            for d in merged.values()
+        ]
+        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
     def list_pending_deltas(
         self, tenant_id: str, user_id: str

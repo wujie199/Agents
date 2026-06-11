@@ -17,8 +17,9 @@ except ImportError:  # pragma: no cover
 from app.agents.enterprise_memory import (
     confirm_pending_l1,
     get_memory_status,
-    list_user_sessions,
+    list_user_sessions_enriched,
     memory_config_summary,
+    refresh_l4_profile,
     purge_old_checkpoints,
     purge_tenant_l3_memory,
     purge_tenant_l4_memory,
@@ -71,7 +72,7 @@ def register_memory_routes(
     async def memory_sessions(body: SessionListRequest) -> dict:
         enforce_rate_limit(body.tenant_id, body.user_id)
         handle = await get_handle(body.tenant_id, body.user_id, body.session_id)
-        rows = await list_user_sessions(handle.run_ctx, limit=body.limit)
+        rows = await list_user_sessions_enriched(handle.run_ctx, limit=body.limit)
         return {
             "tenant_id": body.tenant_id,
             "user_id": body.user_id,
@@ -96,6 +97,12 @@ def register_memory_routes(
         handle = await get_handle(body.tenant_id, body.user_id, body.session_id)
         n = await confirm_pending_l1(handle.run_ctx)
         return {"confirmed": n}
+
+    @router.post("/v1/memory/l4/refresh")
+    async def memory_l4_refresh(body: TenantUserRequest) -> dict:
+        enforce_rate_limit(body.tenant_id, body.user_id)
+        handle = await get_handle(body.tenant_id, body.user_id, body.session_id)
+        return await refresh_l4_profile(handle.run_ctx)
 
     admin_deps = memory_admin_dep or []
 

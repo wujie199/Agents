@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.domain.context import RequestContext
 from app.agents.context_factory import build_chat_run_context
+from app.agents.memory_bootstrap import bootstrap_memory_runtime
 
 from app.agents.chat_config import load_chat_config
 from app.agents.chat_service import (
@@ -34,8 +35,10 @@ from app.agents.memory_metrics import get_memory_metric_stats, prometheus_text
 from app.agents.memory_views import list_pending_l1_deltas
 from app.agents.enterprise_memory import (
     confirm_pending_l1,
+    format_finalize_summary,
     get_memory_status,
-    list_user_sessions,
+    list_user_sessions_enriched,
+    refresh_l4_profile,
 )
 from app.agents.react_loop import end_agent_session
 from app.agents.debug_trace import agent_debug, agent_debug_log_path, set_debug_console, set_debug_quiet
@@ -66,7 +69,10 @@ HELP = """
   /status                   记忆状态摘要（L1/L2/配置）
   /debug-memory             完整 L1-L4/RAG 调试详情（控制台 + NDJSON）
   /triggers                 本轮 L1-L4/RAG 触发链（何时 ON/SKIP）
-  /cache-test [关键词]      同一 query 连调两次 session_search，验证 Redis 缓存 HIT
+  /refresh-profile          刷新 L4 外部画像缓存（不写入 L1）
+  /cache-test [关键词]      连调两次 session_search 验证 L2 HIT（跨轮不清，/quit 才 CLEAR）
+  /rag-cache-test [问题]    同一问题连调两次 RAG，验证 route_and_retrieve 缓存 HIT
+  /redis-health             打印 Redis 缓存适配器 health + stats
   /metrics                  记忆子系统指标（ObservabilityPort）
   /new [session_id]         切换新会话（清空 L2 上下文，可选自定义 id）
   /help                     本帮助
@@ -81,6 +87,19 @@ HELP = """
   --profile     dev（默认）| production
   --stream      流式打印 assistant 回复
 """
+
+
+def _print_pending_hint(run_ctx, pending_before: int) -> None:
+    pending_after = list_pending_l1_deltas(run_ctx)
+    if len(pending_after) > pending_before:
+        rows = pending_after[-(len(pending_after) - pending_before) :]
+        items = ", ".join(
+            f"{r.get('key')}={r.get('value')}" for r in rows if r.get("key")
+        )
+        print(
+            f"[HITL] 新增待确认记忆: {items or len(pending_after) - pending_before} 条。"
+            "输入 /pending 查看，/confirm 确认写入 L1。\n"
+        )
 
 
 async def _handle_line(
@@ -147,8 +166,16 @@ async def _handle_line(
         return True
 
     if line == "/confirm":
+        pending = list_pending_l1_deltas(run_ctx)
+        if not pending:
+            print("\n（无 pending L1 记忆）\n")
+            return True
+        print("\n--- 即将确认 ---")
+        for row in pending:
+            print(f"  {row.get('key')} = {row.get('value')}  [{row.get('source')}]")
         n = await confirm_pending_l1(run_ctx)
-        print(f"\n[ok] 已确认 {n} 条 pending L1 记忆\n")
+        snap = memory.compose_prompt_snapshot(req)
+        print(f"\n[ok] 已确认 {n} 条 → L1 hash={snap.hash}\n")
         return True
 
     if line == "/pending":
@@ -156,22 +183,27 @@ async def _handle_line(
         if not pending:
             print("\n（无 pending L1 记忆）\n")
             return True
-        print("\n--- pending L1 ---")
+        print("\n--- pending L1（输入 /confirm 写入）---")
         for row in pending:
             print(f"  {row.get('key')} = {row.get('value')}  [{row.get('source')}]")
         print()
         return True
 
     if line == "/sessions":
-        rows = await list_user_sessions(run_ctx, limit=20)
+        rows = await list_user_sessions_enriched(run_ctx, limit=20)
         if not rows:
             print("\n（无历史 session）\n")
             return True
-        print("\n--- sessions ---")
+        print("\n--- sessions (online + cold) ---")
         for row in rows:
+            storage = row.get("storage") or "online"
+            extra = ""
+            if row.get("message_count") is not None:
+                extra = f"  msgs={row.get('message_count')}"
             print(
-                f"  {row.get('session_id')}  status={row.get('status')}  "
-                f"started={row.get('started_at', '')}"
+                f"  {row.get('session_id')}  storage={storage}  "
+                f"status={row.get('status')}  "
+                f"started={row.get('started_at', '')}{extra}"
             )
         print()
         return True
@@ -206,6 +238,20 @@ async def _handle_line(
         print("\n" + format_layer_triggers(run_ctx) + "\n")
         return True
 
+    if line == "/refresh-profile":
+        try:
+            result = await refresh_l4_profile(run_ctx)
+        except Exception as exc:
+            print(f"\n[error] L4 refresh failed: {exc}\n")
+            return True
+        facts = result.get("facts") or []
+        print(f"\n--- L4 refreshed: {result.get('fact_count', 0)} facts ---")
+        for row in facts[:8]:
+            if isinstance(row, dict):
+                print(f"  {row.get('key')} = {row.get('value')}  [{row.get('source')}]")
+        print()
+        return True
+
     if line == "/debug-memory":
         rt = await log_memory_runtime_status(
             run_ctx, event="repl_debug_memory", console=False, force=True
@@ -223,7 +269,9 @@ async def _handle_line(
         print(f"\n--- session_search cache probe ---")
         print(f"  cache_adapter={adapter}")
         print(f"  query={probe_query!r}  scope=session  limit=5")
-        print("  (连续调用两次 session_search，第 2 次应 cache HIT)\n")
+        print(
+            "  (连续两次 session_search → HIT；persist_turn 不清缓存，/quit finalize 才 CLEAR)\n"
+        )
         r1 = await memory.session_search(
             probe_query, req, limit=5, scope="session"
         )
@@ -233,7 +281,65 @@ async def _handle_line(
         print(f"  1st: len={len(r1)}  preview={r1[:120]!r}")
         print(f"  2nd: len={len(r2)}  preview={r2[:120]!r}")
         print(f"  identical={r1 == r2}")
-        print(f"  → 日志: {debug_log_path()} (看 cache_hit: false 然后 true)\n")
+        print(f"  → 日志: {debug_log_path()} (MEMORY_RUNTIME_DEBUG=1 时写入)\n")
+        return True
+
+    if line == "/redis-health":
+        cache = (run_ctx.extra or {}).get("cache")
+        adapter = type(cache).__name__ if cache else "none"
+        print("\n--- Redis cache health ---")
+        print(f"  cache_adapter={adapter}")
+        if cache is None:
+            print("  (无 cache port)\n")
+            return True
+        if hasattr(cache, "health"):
+            try:
+                health = await cache.health()
+                for key, val in health.items():
+                    print(f"  {key}={val}")
+            except Exception as exc:
+                print(f"  health() failed: {exc}")
+        elif hasattr(cache, "get_stats"):
+            print(f"  stats={cache.get_stats()}")
+        else:
+            print("  (adapter 无 health/get_stats)")
+        print(f"  → NDJSON: {debug_log_path()}\n")
+        return True
+
+    if line.startswith("/rag-cache-test"):
+        if not enable_rag:
+            print("\n[RAG disabled] 请去掉 --no-rag 启动\n")
+            return True
+        import time
+
+        from app.agents.chat_nodes import retrieve_rag_bundle
+
+        parts = line.split(maxsplit=1)
+        probe_query = (
+            parts[1].strip() if len(parts) > 1 else "如何选择扫地机器人"
+        )
+        print("\n--- RAG cache probe ---")
+        print(f"  query={probe_query!r}")
+        print("  (连续两次 route_and_retrieve，第 2 次应 REDIS HIT)\n")
+        t0 = time.perf_counter()
+        bundle1 = await retrieve_rag_bundle(run_ctx, probe_query)
+        t1 = time.perf_counter()
+        bundle2 = await retrieve_rag_bundle(run_ctx, probe_query)
+        t2 = time.perf_counter()
+        ms1 = round((t1 - t0) * 1000)
+        ms2 = round((t2 - t1) * 1000)
+        n1 = len(bundle1.evidences or [])
+        n2 = len(bundle2.evidences or [])
+        print(
+            f"  1st: {n1} evidences  {ms1}ms  empty={bundle1.empty}"
+        )
+        print(
+            f"  2nd: {n2} evidences  {ms2}ms  empty={bundle2.empty}"
+        )
+        print(
+            f"  → 日志: {debug_log_path()} "
+            f"(MEMORY_RUNTIME_DEBUG=1 时写入)\n"
+        )
         return True
 
     if line == "/metrics":
@@ -278,6 +384,8 @@ async def _handle_line(
         await memory.ensure_session(new_req)
         print(f"\n→ 新会话 session_id={new_sid}（L2 历史独立，L1 仍共享 user）\n")
         return True
+
+    pending_before = len(list_pending_l1_deltas(run_ctx))
 
     try:
         if stream_output:
@@ -328,6 +436,7 @@ async def _handle_line(
                     )
                 )
                 print(format_layer_triggers(run_ctx))
+            _print_pending_hint(run_ctx, pending_before)
             return True
 
         result = await execute_chat_turn(
@@ -367,6 +476,7 @@ async def _handle_line(
             f"{', 空' if result.rag_empty else ''})"
         )
     print(f"\nassistant>{rag_note}\n{result.assistant_text}\n")
+    _print_pending_hint(run_ctx, pending_before)
     if is_memory_runtime_debug() and memory_debug_console_enabled():
         st = await collect_memory_runtime_status(
             run_ctx, event="turn_console", verbose=True
@@ -417,7 +527,7 @@ async def chat_repl(
         set_debug_console(console_debug)
     set_memory_runtime_debug(trace_on)
     set_memory_runtime_verbose(trace_on)
-    chat_cfg = load_chat_config(config_dir)
+    chat_cfg = load_chat_config(config_dir, profile=profile)
     if not enable_memory_tools:
         chat_cfg = replace(chat_cfg, enable_memory_tools=False)
     request = RequestContext(
@@ -433,7 +543,18 @@ async def chat_repl(
         config_dir=config_dir,
         data_dir=str(data_dir),
     )
-    await run_ctx.require_memory().ensure_session(request)
+    boot = await bootstrap_memory_runtime(
+        run_ctx,
+        data_dir=str(data_dir),
+        config_dir=config_dir,
+        profile=profile,
+    )
+    agent_debug(
+        "STARTUP",
+        "chat_repl:bootstrap",
+        "记忆 bootstrap",
+        boot,
+    )
 
     reg = run_ctx.models
     main_info = reg.get_model_info("main_llm") if reg else None
@@ -466,23 +587,24 @@ async def chat_repl(
         },
     )
     await log_memory_runtime_status(run_ctx, event="startup", console=debug)
-    # #region agent log
-    from app.agents.memory_runtime_debug import chat_config_verify_snapshot, trace_write
+    if trace_on:
+        from app.agents.memory_runtime_debug import (
+            chat_config_verify_snapshot,
+            trace_write,
+        )
 
-    trace_write(
-        hypothesis_id="VERIFY-STARTUP",
-        location="chat_repl:startup_config",
-        message="round2 startup config snapshot",
-        data={
-            "chat_config": chat_config_verify_snapshot(chat_cfg),
-            "enable_rag_cli": enable_rag,
-            "engine": engine,
-            "profile": profile,
-        },
-        run_id=session,
-        force=True,
-    )
-    # #endregion
+        trace_write(
+            hypothesis_id="VERIFY-STARTUP",
+            location="chat_repl:startup_config",
+            message="startup config snapshot",
+            data={
+                "chat_config": chat_config_verify_snapshot(chat_cfg),
+                "enable_rag_cli": enable_rag,
+                "engine": engine,
+                "profile": profile,
+            },
+            run_id=session,
+        )
 
     session_handle = ChatSessionHandle(run_ctx=run_ctx, chat_cfg=chat_cfg)
     try:
@@ -541,7 +663,15 @@ async def chat_repl(
             if not cont:
                 break
 
-        await end_agent_session(session_handle.run_ctx, chat_cfg=chat_cfg)
+        if chat_cfg.auto_confirm_pending_on_exit:
+            pending = list_pending_l1_deltas(session_handle.run_ctx)
+            if pending:
+                n = await confirm_pending_l1(session_handle.run_ctx)
+                print(f"\n[auto-confirm] 已确认 {n} 条 pending L1\n")
+
+        fin_summary = await end_agent_session(
+            session_handle.run_ctx, chat_cfg=chat_cfg
+        )
         await log_memory_runtime_status(
             session_handle.run_ctx, event="session_end", console=debug
         )
@@ -556,10 +686,12 @@ async def chat_repl(
                 "hash": snap.hash,
                 "memory_chars": len(snap.memory_text or ""),
                 "memory_preview": (snap.memory_text or "")[:500],
+                "finalize_summary": fin_summary,
             },
         )
-        print("\n[done] session ended + L4 merged into L1")
-        print(f"hash={snap.hash}\n")
+        print("\n[done] session ended")
+        print(f"  {format_finalize_summary(fin_summary)}")
+        print(f"  L1 hash={snap.hash}\n")
         return 0
     finally:
         from app.runtime.adapters.langgraph.checkpointer import (
@@ -590,7 +722,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="详细调试：L1-L4/RAG/Context 全链路 NDJSON（见 .cursor/debug-d0a1fc.log）",
+        help="详细调试：L1-L4/RAG/Context 全链路（MEMORY_RUNTIME_DEBUG + AGENT_PIPELINE_DEBUG）",
     )
     parser.add_argument(
         "--debug-quiet",

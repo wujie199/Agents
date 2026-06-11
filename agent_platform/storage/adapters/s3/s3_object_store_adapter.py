@@ -26,7 +26,8 @@ class S3ObjectStoreAdapter:
         region: str = "us-east-1",
         max_pool_connections: int = 50,
         multipart_threshold: int = 8 * 1024 * 1024,
-        max_retries: int = 3
+        max_retries: int = 3,
+        local_fallback_dir: Optional[str] = None,
     ):
         self._bucket_name = bucket_name
         self._multipart_threshold = multipart_threshold
@@ -34,7 +35,7 @@ class S3ObjectStoreAdapter:
         self._executor = ThreadPoolExecutor(max_workers=10)
         
         self._use_local = True
-        self._local_base = Path("data/objects")
+        self._local_base = Path(local_fallback_dir or "data/objects")
         self._local_base.mkdir(parents=True, exist_ok=True)
         
         try:
