@@ -11,8 +11,8 @@ import yaml
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
-from app.agents.enterprise_memory import list_user_sessions_enriched
-from app.agents.memory_metrics import record_turn_decision
+from app.agents.memory.enterprise_memory import list_user_sessions_enriched
+from app.agents.memory.memory_metrics import record_turn_decision
 
 
 def test_dev_cold_example_config():

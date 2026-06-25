@@ -175,7 +175,7 @@ class RAGPortAdapter:
     ) -> EvidenceBundle:
         def _rag_trace(triggered: bool, reason: str, **extra: Any) -> None:
             try:
-                from app.agents.memory_runtime_debug import trace_layer_trigger
+                from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
                 trace_layer_trigger(
                     None,

@@ -12,30 +12,38 @@ if TYPE_CHECKING:
     from core.ports.privacy import PrivacyPort
     from core.ports.observability import ObservabilityPort
     from core.ports.identity import IdentityPort
+    from core.ports.skills import SkillPort
+    from core.ports.mcp import MCPPort
+    from core.ports.storage import CheckpointerPort
 
 
 @dataclass
 class RunContext:
     request: Any
 
+    # ── 领域能力 Port ──
     rag: Optional["RAGPort"] = None
     index: Optional["IndexPort"] = None
     knowledge_base: Optional["KnowledgeBasePort"] = None
     memory: Optional["MemoryPort"] = None
     tools: Optional["ToolPort"] = None
-    skills: Optional[Any] = None
-    mcp: Optional[Any] = None
+    skills: Optional["SkillPort"] = None
+    mcp: Optional["MCPPort"] = None
     models: Optional["ModelPort"] = None
 
+    # ── L1 横切 Port ──
     policy: Optional["PolicyPort"] = None
     privacy: Optional["PrivacyPort"] = None
     observability: Optional["ObservabilityPort"] = None
     identity: Optional["IdentityPort"] = None
 
+    # ── 运行时辅助 ──
     turn_buffer: Optional[Any] = None
-    checkpointer: Optional[Any] = None
+    checkpointer: Optional["CheckpointerPort"] = None
 
     extra: dict = field(default_factory=dict)
+
+    # ── Backward compat ──
 
     @property
     def index_service(self) -> Optional["IndexPort"]:
@@ -45,6 +53,8 @@ class RunContext:
     @index_service.setter
     def index_service(self, value: Optional["IndexPort"]) -> None:
         self.index = value
+
+    # ── Convenience accessors ──
 
     def get_model(self, role: str) -> Any:
         if self.models is None:
@@ -78,3 +88,18 @@ class RunContext:
         if self.tools is None:
             raise RuntimeError("ToolPort not initialized")
         return self.tools
+
+    def require_skills(self) -> "SkillPort":
+        if self.skills is None:
+            raise RuntimeError("SkillPort not initialized")
+        return self.skills
+
+    def require_mcp(self) -> "MCPPort":
+        if self.mcp is None:
+            raise RuntimeError("MCPPort not initialized")
+        return self.mcp
+
+    def require_checkpointer(self) -> "CheckpointerPort":
+        if self.checkpointer is None:
+            raise RuntimeError("CheckpointerPort not initialized")
+        return self.checkpointer

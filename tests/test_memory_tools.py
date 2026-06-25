@@ -9,8 +9,8 @@ import pytest
 from core.composition.run_context import RunContext
 from core.domain.context import RequestContext
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.memory_tools import build_memory_tools
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.memory.memory_tools import build_memory_tools
 
 
 def _ctx() -> RunContext:

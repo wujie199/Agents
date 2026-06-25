@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from core.domain.evidence import Evidence, EvidenceBundle, SourceType
 
-from app.agents.prompt_builder import filter_evidence_bundle, format_evidence_bundle
+from app.agents.prompts.prompt_builder import filter_evidence_bundle, format_evidence_bundle
 
 
 def _bundle() -> EvidenceBundle:

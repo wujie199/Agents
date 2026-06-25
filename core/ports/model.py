@@ -1,29 +1,3 @@
-from typing import Protocol, Any, Optional
-from dataclasses import dataclass
+"""向后兼容重导出 — 所有符号已移至 core.ports.model。"""
 
-
-@dataclass
-class ModelInfo:
-    role: str
-    profile: str
-    provider: str
-    degraded: bool = False
-    circuit_open: bool = False
-    fallback_index: int = 0
-
-
-class ModelPort(Protocol):
-    def get_model(self, role: str) -> Any:
-        ...
-
-    def get_model_info(self, role: str) -> ModelInfo:
-        ...
-
-    def invalidate_cache(self, role: Optional[str] = None) -> None:
-        ...
-
-    def get_embedding(self, role: str = "embedding") -> Any:
-        ...
-
-    def get_reranker(self, role: str = "rerank") -> Any:
-        ...
+from core.ports.model.port import ModelPort, ModelInfo  # noqa: F401

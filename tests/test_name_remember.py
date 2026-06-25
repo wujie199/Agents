@@ -9,9 +9,9 @@ import pytest
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.name_remember import auto_remember_name_intro, parse_name_from_intro
-from app.agents.retrieval_router import classify_intent
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.memory.name_remember import auto_remember_name_intro, parse_name_from_intro
+from app.agents.roles.retrieval_router import classify_intent
 
 
 def _ctx() -> RunContext:

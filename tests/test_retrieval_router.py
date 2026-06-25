@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.retrieval_router import build_retrieval_plan, classify_intent
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.roles.retrieval_router import build_retrieval_plan, classify_intent
 
 
 def _cfg(**overrides):
@@ -26,7 +26,12 @@ def test_classify_knowledge():
 
 
 def test_classify_recall():
-    assert classify_intent("之前我们聊过什么", _cfg()) == "recall"
+    assert classify_intent("还记得我上次说的吗", _cfg()) == "recall"
+
+
+def test_classify_mixed_recall_knowledge():
+    """混合意图：回忆+知识倾向 → recall_and_knowledge。"""
+    assert classify_intent("之前我们聊过什么", _cfg()) == "recall_and_knowledge"
 
 
 def test_classify_chitchat():
@@ -56,11 +61,19 @@ def test_profile_name_intro_short():
 
 
 def test_recall_skips_rag():
-    plan = build_retrieval_plan("之前说过什么品牌", _cfg(), enable_rag=True)
+    plan = build_retrieval_plan("还记得上次说的吗", _cfg(), enable_rag=True)
     assert plan.intent == "recall"
     assert plan.run_session_search
     assert not plan.run_rag
     assert plan.skip_rag_reason == "recall_intent"
+
+
+def test_mixed_recall_knowledge_runs_rag_and_session_search():
+    """混合意图同时走 session_search 和 RAG。"""
+    plan = build_retrieval_plan("之前说过什么品牌", _cfg(), enable_rag=True)
+    assert plan.intent == "recall_and_knowledge"
+    assert plan.run_session_search
+    assert plan.run_rag
 
 
 def test_knowledge_skips_session_search():
@@ -115,7 +128,7 @@ def test_knowledge_session_search_does_not_skip_rag_on_miss():
 async def _knowledge_session_search_rag_not_skipped():
     from unittest.mock import AsyncMock, MagicMock
 
-    from app.agents.chat_nodes import build_turn_messages
+    from app.agents.orchestration.chat_nodes import build_turn_messages
     from core.composition.run_context import RunContext
     from core.domain.context import RequestContext
     from core.domain.evidence import Evidence, EvidenceBundle, SourceType
@@ -143,7 +156,7 @@ async def _knowledge_session_search_rag_not_skipped():
     ctx = RunContext(request=req, memory=memory, rag=rag)
 
     cfg = _cfg(knowledge_session_search=True, l4_prefetch_on_knowledge=False)
-    _msgs, ev_count, rag_empty, _ = await build_turn_messages(
+    _msgs, ev_count, rag_empty, _, _ = await build_turn_messages(
         ctx, "扫地机器人品牌", cfg, enable_rag=True
     )
     assert ev_count == 1

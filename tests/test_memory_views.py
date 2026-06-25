@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
-from app.agents.memory_views import list_pending_l1_deltas
+from app.agents.memory.memory_views import list_pending_l1_deltas
 
 
 def _ctx(memory: MagicMock) -> RunContext:

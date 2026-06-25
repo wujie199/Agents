@@ -57,7 +57,7 @@ class LlmMemorySummarizerAdapter:
             )
             text = _extract_llm_text(response)
             if text:
-                from app.agents.text_sanitize import has_model_reasoning, strip_model_reasoning
+                from app.agents.prompts.text_sanitize import has_model_reasoning, strip_model_reasoning
 
                 text = strip_model_reasoning(text)
                 if has_model_reasoning(text):

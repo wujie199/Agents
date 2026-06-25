@@ -11,23 +11,32 @@ from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 from core.composition.run_context import RunContext
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.debug_trace import agent_debug
-from app.agents.text_sanitize import sanitize_turn_content, strip_model_reasoning
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.debug.debug_trace import agent_debug
+from app.agents.prompts.text_sanitize import sanitize_turn_content, strip_model_reasoning
 
 if TYPE_CHECKING:
-    from app.agents.retrieval_router import RetrievalPlan
+    from app.agents.roles.retrieval_router import RetrievalPlan
 
 # 寒暄 / 元对话：跳过 RAG
 _RAG_SKIP_RE = re.compile(
     r"^(你好|您好|hi|hello|hey|在吗|谢谢|感谢|再见|拜拜|"
-    r"你叫什么|你是谁|什么模型|who are you)[\s?!.，。~]*$",
+    r"你叫什么|你是谁|什么模型|who are you|"
+    r"好的|ok|okay|嗯|对|是的|没错|不行|不用|不要|"
+    r"继续|停|退出|结束|取消)[\s?!.，。~]*$",
     re.I,
 )
 
 # 回忆类：可预检索 session_search
 _RECALL_RE = re.compile(
-    r"之前|上次|刚才|还记得|记得吗|说过什么|问过什么|我们聊|早些时候|前面",
+    r"之前|上次|刚才|还记得|记得吗|说过什么|问过什么|我们聊|早些时候|前面|"
+    r"之前聊|之前问|上次说的|刚才提到的|前面提到的|之前提到的|还记得吗",
+)
+
+# 知识倾向：query 中同时包含回忆 + 知识检索关键词（混合意图）
+_KNOWLEDGE_LIKE_RE = re.compile(
+    r"怎么样|如何|什么|哪个|区别|对比|分析|原理|机制|定义|方案|建议|"
+    r"推荐|好不好|行不行|能不能|是不是|怎么选",
 )
 
 # 跨会话回忆
@@ -122,6 +131,17 @@ def resolve_recall_scope(query: str, cfg: ChatAgentConfig) -> str:
 
 def is_skill_query(query: str) -> bool:
     return bool(_SKILL_RE.search((query or "").strip()))
+
+
+def is_knowledge_like(query: str) -> bool:
+    """query 包含知识倾向关键词（如"怎么样"、"如何"、"区别"等）。"""
+    return bool(_KNOWLEDGE_LIKE_RE.search((query or "").strip()))
+
+
+def is_mixed_recall_knowledge(query: str) -> bool:
+    """混合意图：同时包含回忆标记和知识倾向（如"上次问的那个方案怎么样了"）。"""
+    q = (query or "").strip()
+    return is_recall_query(q) and is_knowledge_like(q)
 
 
 def is_l4_query(query: str) -> bool:
@@ -317,7 +337,7 @@ async def build_rolling_summary(
                 if cfg.rolling_summary_user_only
                 else ""
             )
-            from app.agents.memory_runtime_debug import perf_await
+            from app.agents.memory.memory_runtime_debug import perf_await
 
             resp = await perf_await(
                 ctx,
@@ -353,13 +373,17 @@ async def prefetch_session_recall(
     *,
     enabled: bool = True,
 ) -> str:
-    from app.agents.memory_runtime_debug import trace_layer_trigger
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
     if not enabled:
         trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_disabled")
         return ""
     if not cfg.session_search_prefetch:
         trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "config_off")
+        return ""
+    # ── P3: 如果 retrieval_plan 明确跳过 session_search，直接返回 ──
+    if hasattr(cfg, "_plan_skip_session_search") and cfg._plan_skip_session_search:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_skip")
         return ""
     if not cfg.retrieval_orchestration and not is_recall_query(query):
         trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "not_recall_query")
@@ -387,7 +411,7 @@ async def prefetch_session_recall(
             use_llm_summary=use_llm_summary,
             prefer_user_role=prefer_user,
         )
-        from app.agents.text_sanitize import has_model_reasoning, strip_model_reasoning
+        from app.agents.prompts.text_sanitize import has_model_reasoning, strip_model_reasoning
 
         text = strip_model_reasoning(text)
         if has_model_reasoning(text):
@@ -413,7 +437,7 @@ async def prefetch_skill_hints(
     *,
     enabled: bool = True,
 ) -> str:
-    from app.agents.memory_runtime_debug import trace_layer_trigger
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
     if not enabled:
         trace_layer_trigger(ctx, "L3", "skill_prefetch", False, "plan_disabled")
@@ -449,7 +473,7 @@ async def prefetch_l4_profile(
     *,
     enabled: bool = True,
 ) -> str:
-    from app.agents.memory_runtime_debug import trace_layer_trigger
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
     if not enabled:
         trace_layer_trigger(ctx, "L4", "profile_prefetch", False, "plan_disabled")
@@ -498,13 +522,13 @@ async def prepare_session_context(
     """
     返回 SessionContextBuildResult（含 recall_prefetch 供 RAG 短路判断）。
     """
-    from app.agents.retrieval_router import build_retrieval_plan
+    from app.agents.roles.retrieval_router import build_retrieval_plan
 
     plan = retrieval_plan or build_retrieval_plan(
         user_message, cfg, enable_rag=cfg.enable_rag
     )
 
-    from app.agents.memory_runtime_debug import trace_layer_trigger
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
     history = dedupe_history_turns(history)
     collapse_user = plan.intent == "knowledge"
@@ -542,7 +566,7 @@ async def prepare_session_context(
         _run_skills(),
         _run_l4(),
     )
-    from app.agents.memory_runtime_debug import perf_mark
+    from app.agents.memory.memory_runtime_debug import perf_mark
 
     _prefetch_ms = (_time.perf_counter() - _prefetch_t0) * 1000
     perf_mark(
@@ -552,7 +576,7 @@ async def prepare_session_context(
         intent=plan.intent,
     )
     if plan.run_session_search:
-        from app.agents.memory_metrics import record_session_search
+        from app.agents.memory.memory_metrics import record_session_search
 
         recall_text = (recall or "").strip()
         if not recall_text:
@@ -589,6 +613,13 @@ async def prepare_session_context(
     trimmed = trim_history_tail_chars(recent, cfg.max_history_chars)
     if plan.intent == "knowledge":
         trimmed = compress_history_for_knowledge(trimmed)
+    # ── P2: 意图动态预算：知识/寒暄减少历史、回忆保持完整 ──
+    _intent = plan.intent
+    if _intent in ("knowledge", "chitchat", "recall_and_knowledge"):
+        _budget_chars = int(cfg.max_history_chars * 0.6)
+        trimmed = trim_history_tail_chars(trimmed, _budget_chars)
+    elif _intent == "recall":
+        pass  # 回忆意图保持完整历史
     extras: List[str] = []
     if summary:
         extras.append(summary)
@@ -644,7 +675,7 @@ async def extract_l1_facts_from_session(
     turns: List[dict],
     cfg: ChatAgentConfig,
 ) -> List[dict[str, str]]:
-    """会话结束：从 L2 抽取结构化 KV，供 pending L1。"""
+    """会话结束：从 L2 抽取结构化 KV，供 pending L1。返回项含 confidence。"""
     if not cfg.enable_l1_extract_on_finalize or not turns:
         return []
     if not cfg.use_llm_l1_extract or ctx.models is None:
@@ -663,11 +694,12 @@ async def extract_l1_facts_from_session(
                     "role": "system",
                     "content": (
                         "从对话中提取用户长期偏好，仅输出 JSON 数组 "
-                        '[{"key":"...","value":"..."}]。'
+                        '[{"key":"...","value":"...","confidence":0.0-1.0}]。'
                         f"只允许 key: {prompt_keys}。"
                         "无明确信息则输出 []。"
                         "输出格式 仅当用户明确要求 JSON/结构化回复时才提取，"
                         "勿因 assistant 使用 JSON 而提取。"
+                        "confidence: 明确事实(姓名/称呼/语言)≥0.9，合理推断≥0.6，不确定<0.6。"
                     ),
                 },
                 {"role": "user", "content": transcript[:6000]},
@@ -685,13 +717,14 @@ async def extract_l1_facts_from_session(
                 continue
             key = str(item.get("key", "")).strip()
             value = str(item.get("value", "")).strip()
+            confidence = float(item.get("confidence", 0.7))
             if (
                 key
                 and value
                 and (not allowed or key in allowed)
                 and is_allowed_l1_value(key, value)
             ):
-                out.append({"key": key, "value": value})
+                out.append({"key": key, "value": value, "confidence": str(confidence)})
         return out[: cfg.l1_extract_max_items]
     except Exception:
         return []

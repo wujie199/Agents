@@ -18,16 +18,22 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage, add_mess
 
 from core.composition.run_context import RunContext
 
-from app.agents.chat_config import ChatAgentConfig, load_chat_config
-from app.agents.chat_nodes import build_turn_messages, persist_user_and_assistant
-from app.agents.text_sanitize import strip_model_reasoning
-from app.agents.retrieval_router import should_use_direct_llm_for_intent
-from app.agents.react_turn import (
+from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
+from app.agents.orchestration.chat_nodes import build_turn_messages, persist_user_and_assistant
+from app.agents.prompts.text_sanitize import strip_model_reasoning
+from app.agents.roles.retrieval_router import should_use_direct_llm_for_intent
+from app.agents.roles.react_turn import (
     dict_messages_to_lc,
     invoke_direct_llm,
     last_ai_text,
     make_react_agent,
 )
+from app.agents.middleware.compose import wrap_node, compose_middlewares
+from app.agents.middleware.tracing import TracingMiddleware
+from app.agents.middleware.logging import LoggingMiddleware
+from app.agents.middleware.policy import PolicyMiddleware
+from app.agents.middleware.privacy import PrivacyMiddleware
+from app.agents.middleware.audit import AuditMiddleware
 
 
 class ChatGraphState(TypedDict):
@@ -37,6 +43,7 @@ class ChatGraphState(TypedDict):
     evidence_count: int
     rag_empty: bool
     memory_snapshot_hash: str
+    evidences_summary: list
 
 
 async def _prepare_node(
@@ -54,16 +61,16 @@ async def _prepare_node(
                 user_input = str(msg.content or "").strip()
                 break
 
-    dict_messages, ev_count, rag_empty, mem_hash = await build_turn_messages(
+    dict_messages, ev_count, rag_empty, mem_hash, evidences_summary = await build_turn_messages(
         ctx,
         user_input,
         chat_cfg,
         enable_rag=enable_rag,
     )
     lc_messages = dict_messages_to_lc(dict_messages)
-    from app.agents.debug_trace import agent_debug
+    from app.agents.debug.debug_trace import agent_debug
 
-    from app.agents.memory_runtime_debug import perf_mark
+    from app.agents.memory.memory_runtime_debug import perf_mark
 
     _node_ms = (time.perf_counter() - _node_t0) * 1000
     perf_mark(
@@ -93,6 +100,7 @@ async def _prepare_node(
         "evidence_count": ev_count,
         "rag_empty": rag_empty,
         "memory_snapshot_hash": mem_hash,
+        "evidences_summary": evidences_summary or [],
     }
 
 
@@ -114,9 +122,9 @@ async def _persist_node(
             assistant_text=assistant_text,
             chat_cfg=chat_cfg,
         )
-    from app.agents.debug_trace import agent_debug
+    from app.agents.debug.debug_trace import agent_debug
 
-    from app.agents.memory_runtime_debug import perf_mark
+    from app.agents.memory.memory_runtime_debug import perf_mark
 
     _node_ms = (time.perf_counter() - _node_t0) * 1000
     perf_mark(ctx, "GRAPH.persist_node", _node_ms)
@@ -134,6 +142,27 @@ async def _persist_node(
     return {"assistant_text": assistant_text}
 
 
+def _make_sync_compat_wrapped(middlewares, node_fn, node_name):
+    """用 middleware 包装节点函数，返回 LangGraph 兼容的异步函数。
+
+    LangGraph 节点签名: async (state, config) -> dict
+    wrap_node 返回: async (state, config) -> result
+    两者兼容，直接包装即可。
+    """
+    # wrap_node 是 async 函数返回 wrapped，我们同步调用它来获取 wrapped
+    # 但 wrap_node 本身是 async，所以需要 event_loop
+    # 改用惰性包装：返回一个 async 函数，首次调用时执行 wrap
+    _wrapped = None
+
+    async def _lazy_wrapped(state, config):
+        nonlocal _wrapped
+        if _wrapped is None:
+            _wrapped = await wrap_node(middlewares, node_fn, node_name)
+        return await _wrapped(state, config)
+
+    return _lazy_wrapped
+
+
 def build_chat_langgraph_workflow(
     ctx: RunContext,
     chat_cfg: ChatAgentConfig | None = None,
@@ -142,10 +171,19 @@ def build_chat_langgraph_workflow(
     cfg = chat_cfg or load_chat_config()
     react_agent = make_react_agent(ctx, cfg)
 
+    # ── 构建 Middleware 链 ──
+    middlewares = compose_middlewares(
+        TracingMiddleware(),
+        PolicyMiddleware(),
+        LoggingMiddleware(),
+        PrivacyMiddleware(),
+        AuditMiddleware(),
+    )
+
     async def _agent_node(
         state: ChatGraphState, config: RunnableConfig
     ) -> dict[str, Any]:
-        from app.agents.memory_runtime_debug import perf_mark
+        from app.agents.memory.memory_runtime_debug import perf_mark
 
         _agent_cfg = (config or {}).get("configurable") or {}
         _agent_ctx = _agent_cfg.get("run_ctx")
@@ -190,9 +228,13 @@ def build_chat_langgraph_workflow(
         }
 
     graph = StateGraph(ChatGraphState)
-    graph.add_node("prepare", _prepare_node)
-    graph.add_node("agent", _agent_node)
-    graph.add_node("persist", _persist_node)
+    # 用 middleware 包装关键节点
+    _wrapped_prepare = _make_sync_compat_wrapped(middlewares, _prepare_node, "prepare")
+    _wrapped_agent = _make_sync_compat_wrapped(middlewares, _agent_node, "agent")
+    _wrapped_persist = _make_sync_compat_wrapped(middlewares, _persist_node, "persist")
+    graph.add_node("prepare", _wrapped_prepare)
+    graph.add_node("agent", _wrapped_agent)
+    graph.add_node("persist", _wrapped_persist)
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "agent")
     graph.add_edge("agent", "persist")

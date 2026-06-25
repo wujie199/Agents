@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import SessionContextBuildResult
-from app.agents.retrieval_router import RetrievalPlan
+from app.agents.roles.retrieval_router import RetrievalPlan
 
 
 def _cfg(**kw):

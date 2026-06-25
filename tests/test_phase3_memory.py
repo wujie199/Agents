@@ -12,13 +12,13 @@ from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
 from app.agents.context_builder import is_skill_query
-from app.agents.enterprise_memory import format_finalize_summary, refresh_l4_profile
-from app.agents.retrieval_router import (
+from app.agents.memory.enterprise_memory import format_finalize_summary, refresh_l4_profile
+from app.agents.roles.retrieval_router import (
     build_retrieval_plan,
     classify_intent,
     should_use_direct_llm_for_intent,
 )
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from agent_platform.memory.adapters.cached_external_memory_adapter import (
     CachedExternalMemoryAdapter,
 )

@@ -2,29 +2,29 @@
 # LLM：优先外置盘/Ollama → DashScope qwen3.6-plus（config/models.yml）
 chat:
   enable_rag: true
-  max_history_turns: 10
-  max_evidence_chars: 6000
-  max_evidence_items: 8
-  rag_min_score: 0.35
+  max_history_turns: 6
+  max_evidence_chars: 4000
+  max_evidence_items: 5
+  rag_min_score: 0.45
   rag_min_keep: 3
   model_role: main_llm
 
   # Context Builder：字符预算 + 滚动摘要 + RAG 门控
-  max_history_chars: 12000
+  max_history_chars: 8000
   recent_turns: 6
   enable_rag_gating: true
   rag_gating_min_chars: 4
   enable_rolling_summary: true
   rolling_summary_max_chars: 1500
-  use_llm_rolling_summary: true
+  use_llm_rolling_summary: false
   summarizer_role: memory_summarizer_llm
   session_search_prefetch: true
-  session_search_prefetch_limit: 5
-  session_search_prefetch_max_chars: 2000
+  session_search_prefetch_limit: 3
+  session_search_prefetch_max_chars: 1200
   session_search_prefetch_scope: auto   # auto | session | user
   # 知识类 L2 预检索用截断拼接（避免 LLM 二次摘要慢且带入历史幻觉）
   session_search_use_llm_summary: false
-  session_search_llm_on_recall: true
+  session_search_llm_on_recall: false
   skill_prefetch: true
   l4_profile_prefetch: true
 
@@ -32,6 +32,10 @@ chat:
   retrieval_orchestration: true
   recall_wins_over_rag: true
   knowledge_skips_recall: true
+  # 回忆 + RAG 并行融合（混合意图 recall_and_knowledge：同时走 session_search + RAG）
+  recall_rag_fusion: true
+  fusion_recall_weight: 0.6
+  fusion_rag_weight: 0.4
   # 知识类问题同时预检索 L2 会话（与 RAG 并行）
   knowledge_session_search: true
   # 知识类问题：仅当 query 命中 L4/profile 模式时预取（非全量注入）
@@ -45,7 +49,7 @@ chat:
   evidence_strict_grounding: true
   # 回忆未命中时提示 Agent 调用 session_search 工具
   recall_tool_hint_on_miss: true
-  # LLM 意图路由（默认关闭，用正则；开启后用 router_llm）
+  # LLM 意图路由（默认开启，正则做硬规则快速通道，LLM 做软路由）
   retrieval_llm_router: false
   retrieval_router_role: router_llm
   retrieval_router_confidence_min: 0.6
@@ -81,3 +85,43 @@ chat:
     - 输出格式
     - 时区
     - 项目
+
+  # L1 置信度分层自动写入
+  l1_auto_write_confidence_min: 0.9
+  # L1 冲突策略：overwrite | keep_old | ask_user
+  l1_conflict_strategy: ask_user
+
+  # 时间衰减：近期 session_search 结果权重高于远期
+  time_decay: true
+  time_decay_half_life_days: 90
+
+# DeepAgents 规划层（可选依赖，pip install 'agents[planning]'）
+# 外层规划 harness：复杂任务分解 → 子Agent调度 → 上下文隔离
+deep_agent:
+  enable: false
+  semantic_gate: true
+  gate_threshold: 0.7
+  planning_model_role: main_llm
+  system_prompt: "你是企业助手。简单问题委托 chat-worker，研究任务委托 research-agent，报告生成委托 report-writer。"
+  complex_task_patterns:
+    - "先.*再.*然后"
+    - "帮我写.*报告"
+    - "对比分析"
+    - "制定.*方案"
+    - "写一份.*文档"
+    - "分析.*并.*建议"
+  # 子Agent 定义（除 chat-worker 自动桥接外）
+  subagents: []
+  #  # - name: research-agent
+  #  #   description: 深度检索：多轮RAG+跨源摘要合成
+  #  #   prompt: 你是深度研究员，擅长综合多源信息产出结构化分析
+  #  #   model: openai:gpt-4o
+  #  # - name: report-writer
+  #  #   description: 长文写作：大纲→章节并行→合并审查
+  #  #   prompt: 你是专业报告撰写员
+  #  #   model: openai:gpt-4o
+  interrupt_on:
+    delete_file:
+      allowed_decisions:
+        - approve
+        - reject

@@ -13,8 +13,8 @@ from core.composition.run_context import RunContext
 
 from agent_platform.memory.adapters.config_loader import load_memory_config
 from app.agents.context_factory import resolve_rag_tenant_id
-from app.agents.chat_config import load_chat_config
-from app.agents.memory_bootstrap import (
+from app.agents.orchestration.chat_config import load_chat_config
+from app.agents.memory.memory_bootstrap import (
     bootstrap_memory_runtime,
     seed_l4_profile_if_missing,
 )

@@ -9,7 +9,7 @@ from agent_platform.infrastructure.observability.adapter import (
     ObservabilityPortAdapter,
 )
 
-from app.agents.memory_metrics import (
+from app.agents.memory.memory_metrics import (
     get_memory_metric_stats,
     get_memory_metric_stats_from_obs,
     prometheus_text,

@@ -1,103 +1,31 @@
+"""生产/开发环境 RunContext 装配入口。
+
+组合 infrastructure_factory、storage_factory、memory_helpers、rag_factory_helpers
+等辅助工厂，构建完整的 RunContext。
+"""
+
 import os
 from pathlib import Path
 from typing import Any, Optional, Tuple
-from urllib.parse import urlparse
+
 from core.domain.context import RequestContext
-from agent_platform.infrastructure.config.adapter import ConfigPortAdapter
-from agent_platform.infrastructure.secret.adapter import SecretPortAdapter
-from agent_platform.infrastructure.privacy.adapter import PrivacyPortAdapter
-from agent_platform.infrastructure.identity.adapter import IdentityPortAdapter
-from agent_platform.infrastructure.policy.adapter import PolicyPortAdapter
-from agent_platform.infrastructure.observability.adapter import ObservabilityPortAdapter
-from agent_platform.infrastructure.skills.adapter import SimpleSkillAdapter
-from agent_platform.infrastructure.mcp.adapter import EnterpriseMCPAdapter
-from agent_platform.storage.adapters.redis.cache_adapter import EnterpriseRedisCacheAdapter
-from agent_platform.storage.adapters.sqlite.relational_adapter import AsyncSQLiteRelationalAdapter
-from agent_platform.storage.adapters.graph.memory_graph_adapter import MemoryGraphAdapter
-from agent_platform.storage.adapters.s3.s3_object_store_adapter import S3ObjectStoreAdapter
 from core.composition.run_context import RunContext
+from core.composition.infrastructure_factory import (
+    build_infrastructure_ports,
+)
+from core.composition.storage_factory import (
+    build_cache_port,
+    build_storage_ports,
+)
 from core.composition.rag_factory_helpers import build_rag_stack
-from agent_platform.memory.adapters.config_loader import load_memory_config
-from agent_platform.memory.adapters.external_factory import build_external_memory
-from agent_platform.memory.adapters.hot_memory_compressor_adapter import (
-    LlmHotMemoryCompressorAdapter,
-    TruncatingHotMemoryCompressorAdapter,
-)
-from agent_platform.memory.adapters.llm_summarizer_adapter import (
-    LlmMemorySummarizerAdapter,
-)
-from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapter
-from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
-from agent_platform.memory.adapters.session_vector_factory import build_session_vector_index
-from agent_platform.memory.adapters.archive_factory import build_archive_db
-from agent_platform.memory.adapters.field_crypto import resolve_encryption_key
 from core.composition.memory_helpers import (
     build_checkpointer,
-    build_hot_memory,
     build_turn_buffer,
 )
 
-
-def _parse_redis_url(url: str) -> Tuple[str, int, Optional[str], int]:
-    parsed = urlparse(url)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 6379
-    db = 0
-    if parsed.path and parsed.path != "/":
-        try:
-            db = int(parsed.path.lstrip("/"))
-        except ValueError:
-            db = 0
-    return host, port, parsed.password, db
-
-
-def build_cache_port(
-    *,
-    redis_host: Optional[str] = None,
-    redis_port: Optional[int] = None,
-    redis_password: Optional[str] = None,
-    redis_db: int = 0,
-    pool_size: int = 10,
-    prefix: Optional[str] = None,
-) -> Any:
-    """构建 CachePort（Redis；支持 REDIS_URL / REDIS_HOST）。"""
-    if prefix is None:
-        prefix = os.environ.get("CHAT_CACHE_REDIS_PREFIX", "agents")
-    host = redis_host or os.environ.get("REDIS_HOST", "localhost")
-    port = redis_port if redis_port is not None else int(
-        os.environ.get("REDIS_PORT", "6379")
-    )
-    password = (
-        redis_password
-        if redis_password is not None
-        else os.environ.get("REDIS_PASSWORD")
-    )
-    db = redis_db
-    redis_url = os.environ.get("REDIS_URL") or os.environ.get(
-        "CHAT_RATE_LIMIT_REDIS_URL"
-    )
-    if redis_url:
-        url_host, url_port, url_password, url_db = _parse_redis_url(redis_url)
-        if redis_host is None:
-            host = url_host
-        if redis_port is None:
-            port = url_port
-        if password is None:
-            password = url_password
-        if redis_db == 0:
-            db = url_db
-
-    return EnterpriseRedisCacheAdapter(
-        host=host,
-        port=port,
-        db=db,
-        password=password,
-        prefix=prefix,
-        pool_size=pool_size,
-        retry_times=3,
-        circuit_breaker_threshold=5,
-        enable_fallback=True,
-    )
+from agent_platform.infrastructure.skills.adapter import SimpleSkillAdapter
+from agent_platform.infrastructure.mcp.adapter import EnterpriseMCPAdapter
+from agent_platform.memory.adapters.config_loader import load_memory_config
 
 
 def _resolve_dev_rag_paths(data_dir: str) -> Tuple[str, str]:
@@ -110,11 +38,13 @@ def _resolve_dev_rag_paths(data_dir: str) -> Tuple[str, str]:
     return str(base / "chroma_dev"), str(base)
 
 
+# ── Memory Port 构建 ──
+
 def _build_memory_port(
     config_dir: str,
     data_dir: str,
     archive_db: Any,
-    privacy: PrivacyPortAdapter,
+    privacy: Any,
     skills: SimpleSkillAdapter,
     cache: Any = None,
     models: Any = None,
@@ -125,8 +55,21 @@ def _build_memory_port(
     index_port: Any = None,
     secret: Any = None,
     mem_cfg_override: Optional[dict] = None,
-) -> "MemoryPortAdapter":
+) -> Any:
     from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
+    from agent_platform.memory.adapters.hot_memory_compressor_adapter import (
+        LlmHotMemoryCompressorAdapter,
+        TruncatingHotMemoryCompressorAdapter,
+    )
+    from agent_platform.memory.adapters.llm_summarizer_adapter import (
+        LlmMemorySummarizerAdapter,
+    )
+    from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapter
+    from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
+    from agent_platform.memory.adapters.session_vector_factory import build_session_vector_index
+    from agent_platform.memory.adapters.external_factory import build_external_memory
+    from agent_platform.memory.adapters.field_crypto import resolve_encryption_key
+    from core.composition.memory_helpers import build_hot_memory
 
     cfg = load_memory_config(f"{config_dir}/memory.yml")
     if mem_cfg_override:
@@ -226,6 +169,51 @@ def _build_memory_port(
     )
 
 
+# ── 核心装配逻辑 ──
+
+def _assemble_run_context(
+    request: RequestContext,
+    config_dir: str,
+    data_dir: str,
+    models: Any,
+    tools: Any,
+    skills: SimpleSkillAdapter,
+    mcp: Any,
+    infra: Any,
+    storage: Any,
+    rag: Any,
+    index_port: Any,
+    knowledge_base: Any,
+    memory: Any,
+    mem_cfg: dict,
+    extra: dict,
+) -> RunContext:
+    """将已构建的各端口组装为 RunContext。"""
+    turn_buffer = build_turn_buffer(memory, mem_cfg)
+    checkpointer = build_checkpointer(storage.relational)
+
+    return RunContext(
+        request=request,
+        rag=rag,
+        index=index_port,
+        knowledge_base=knowledge_base,
+        memory=memory,
+        tools=tools,
+        skills=skills,
+        mcp=mcp,
+        models=models,
+        policy=infra.policy,
+        privacy=infra.privacy,
+        observability=infra.observability,
+        identity=infra.identity,
+        turn_buffer=turn_buffer,
+        checkpointer=checkpointer,
+        extra=extra,
+    )
+
+
+# ── 公共入口 ──
+
 def build_production_context(
     request: RequestContext,
     config_dir: str = "config",
@@ -238,135 +226,101 @@ def build_production_context(
     s3_secret_key: Optional[str] = None,
     s3_bucket: str = "agents-storage",
     use_memory_graph: bool = True,
-    **overrides
+    **overrides,
 ) -> RunContext:
-    """
-    构建生产环境 RunContext（企业级实现）。
+    """构建生产环境 RunContext（企业级实现）。"""
+    # ── L1 基础设施 ──
+    infra = build_infrastructure_ports(config_dir=config_dir, service_name="agents")
 
-    Args:
-        request: RequestContext
-        config_dir: 配置文件目录
-        data_dir: 数据目录
-        redis_host: Redis 主机
-        redis_port: Redis 端口
-        redis_password: Redis 密码
-        s3_endpoint: S3/OBS 端点
-        s3_access_key: S3 Access Key
-        s3_secret_key: S3 Secret Key
-        s3_bucket: S3 桶名
-        use_memory_graph: 使用内存图库（开发用）
-        **overrides: 覆盖指定 Port
-    """
-    config = ConfigPortAdapter(config_dir=config_dir)
-    secret = SecretPortAdapter()
-    privacy = PrivacyPortAdapter()
-    identity = IdentityPortAdapter()
-    policy = PolicyPortAdapter(config_path=f"{config_dir}/concurrency.yml")
-    observability = ObservabilityPortAdapter(service_name="agents")
-    
-    cache = build_cache_port(
+    # ── 记忆配置 ──
+    mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
+
+    # ── L3 存储 ──
+    storage = build_storage_ports(
+        mem_cfg=mem_cfg,
+        data_dir=data_dir,
         redis_host=redis_host,
         redis_port=redis_port,
         redis_password=redis_password,
-        pool_size=20,
+        cache_pool_size=20,
+        use_memory_graph=use_memory_graph,
+        s3_endpoint=s3_endpoint,
+        s3_access_key=s3_access_key,
+        s3_secret_key=s3_secret_key,
+        s3_bucket=s3_bucket,
     )
-    
-    mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
-    relational = build_archive_db(mem_cfg, data_dir=data_dir)
-    
-    if use_memory_graph:
-        graph = MemoryGraphAdapter()
-    else:
-        from agent_platform.storage.adapters.neo4j.neo4j_graph_adapter import Neo4jGraphAdapter
-        graph = Neo4jGraphAdapter(
-            uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-            user=os.environ.get("NEO4J_USER", "neo4j"),
-            password=os.environ.get("NEO4J_PASSWORD", ""),
-            max_connection_pool_size=50
-        )
-    
-    object_store = S3ObjectStoreAdapter(
-        endpoint_url=s3_endpoint or os.environ.get("S3_ENDPOINT"),
-        access_key=s3_access_key or os.environ.get("S3_ACCESS_KEY", ""),
-        secret_key=s3_secret_key or os.environ.get("S3_SECRET_KEY", ""),
-        bucket_name=os.environ.get("S3_BUCKET", s3_bucket)
-    )
-    
+
+    # ── Skills & MCP ──
     skills = SimpleSkillAdapter(skills_dir="skills/published")
-    
     mcp = EnterpriseMCPAdapter(
         config_path=f"{config_dir}/mcp_servers.yml",
         max_connections_per_server=3,
         default_timeout=30.0,
         health_check_interval=30.0,
-        circuit_breaker_threshold=5
+        circuit_breaker_threshold=5,
     )
-    
+
+    # ── 模型 ──
     from agent_platform.model.registry import ModelRegistry
     models = ModelRegistry(config_path=f"{config_dir}/models.yml")
-    
-    from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 
-    vector_port = ChromaVectorAdapter(persist_directory=f"{data_dir}/chroma")
+    # ── RAG 栈 ──
     rag, index_port, knowledge_base, _, _ = build_rag_stack(
         models=models,
-        vector_port=vector_port,
-        cache_port=cache,
+        vector_port=storage.vector,
+        cache_port=storage.cache,
         config_dir=config_dir,
-        sql_port=relational,
-        graph_port=graph,
-        privacy_port=privacy,
+        sql_port=storage.relational,
+        graph_port=storage.graph,
+        privacy_port=infra.privacy,
         data_dir=data_dir,
     )
 
+    # ── 工具 ──
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
-    
+
+    # ── 记忆 ──
     memory = _build_memory_port(
         config_dir=config_dir,
         data_dir=data_dir,
-        archive_db=relational,
-        privacy=privacy,
+        archive_db=storage.relational,
+        privacy=infra.privacy,
         skills=skills,
-        cache=cache,
+        cache=storage.cache,
         models=models,
         store_dir_override=None,
-        object_store=object_store,
+        object_store=storage.object_store,
         index_port=index_port,
-        secret=secret,
+        secret=infra.secret,
     )
 
     from agent_platform.memory.memory_tool_registration import register_memory_tools
-
     register_memory_tools(tools, memory)
 
-    turn_buffer = build_turn_buffer(memory, mem_cfg)
-    checkpointer = build_checkpointer(relational)
-
-    return RunContext(
+    return _assemble_run_context(
         request=request,
-        rag=rag,
-        index=index_port,
-        knowledge_base=knowledge_base,
-        memory=memory,
+        config_dir=config_dir,
+        data_dir=data_dir,
+        models=models,
         tools=tools,
         skills=skills,
         mcp=mcp,
-        models=models,
-        policy=policy,
-        privacy=privacy,
-        observability=observability,
-        identity=identity,
-        turn_buffer=turn_buffer,
-        checkpointer=checkpointer,
+        infra=infra,
+        storage=storage,
+        rag=rag,
+        index_port=index_port,
+        knowledge_base=knowledge_base,
+        memory=memory,
+        mem_cfg=mem_cfg,
         extra={
-            "config": config,
-            "secret": secret,
-            "cache": cache,
-            "relational": relational,
-            "graph": graph,
-            "object_store": object_store,
-            "vector_port": vector_port,
+            "config": infra.config,
+            "secret": infra.secret,
+            "cache": storage.cache,
+            "relational": storage.relational,
+            "graph": storage.graph,
+            "object_store": storage.object_store,
+            "vector_port": storage.vector,
             "data_dir": data_dir,
             "memory_config_summary": {
                 "memory_config_path": mem_cfg.get("_config_path"),
@@ -378,7 +332,7 @@ def build_production_context(
                     "enable_session_vector_index"
                 ),
             },
-        }
+        },
     )
 
 
@@ -386,105 +340,94 @@ def build_development_context(
     request: RequestContext,
     config_dir: str = "config",
     data_dir: str = "data",
-    **overrides
+    **overrides,
 ) -> RunContext:
-    """
-    构建开发环境 RunContext。
+    """构建开发环境 RunContext。"""
+    # ── L1 基础设施 ──
+    infra = build_infrastructure_ports(config_dir=config_dir, service_name="agents-dev")
 
-    Args:
-        request: RequestContext
-        config_dir: 配置文件目录
-        data_dir: 数据目录
-        **overrides: 覆盖指定 Port
-    """
-    config = ConfigPortAdapter(config_dir=config_dir)
-    secret = SecretPortAdapter()
-    privacy = PrivacyPortAdapter()
-    identity = IdentityPortAdapter()
-    policy = PolicyPortAdapter(config_path=f"{config_dir}/concurrency.yml")
-    observability = ObservabilityPortAdapter(service_name="agents-dev")
-
-    cache = build_cache_port(pool_size=10)
-
+    # ── 记忆配置 ──
     mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
-    relational = build_archive_db(mem_cfg, data_dir=data_dir, db_name="dev_archive.db")
-    
-    graph = MemoryGraphAdapter()
-    
-    object_store = S3ObjectStoreAdapter()
-    
+
+    # ── L3 存储 ──
+    storage = build_storage_ports(
+        mem_cfg=mem_cfg,
+        data_dir=data_dir,
+        relational_db_name="dev_archive.db",
+        cache_pool_size=10,
+        use_memory_graph=True,
+    )
+
+    # ── Skills & MCP ──
     skills = SimpleSkillAdapter(skills_dir="skills/published")
-    
     mcp = EnterpriseMCPAdapter(config_path=f"{config_dir}/mcp_servers.yml")
-    
+
+    # ── 模型 ──
     from agent_platform.model.registry import ModelRegistry
-
     models = ModelRegistry(config_path=f"{config_dir}/models.yml")
-    
-    from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 
+    # ── RAG 栈（开发路径） ──
     chroma_dir, rag_data_dir = _resolve_dev_rag_paths(data_dir)
-    vector_port = ChromaVectorAdapter(persist_directory=chroma_dir)
+    from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
+    dev_vector = ChromaVectorAdapter(persist_directory=chroma_dir)
     rag, index_port, knowledge_base, _, _ = build_rag_stack(
         models=models,
-        vector_port=vector_port,
-        cache_port=cache,
+        vector_port=dev_vector,
+        cache_port=storage.cache,
         config_dir=config_dir,
-        sql_port=relational,
-        graph_port=graph,
-        privacy_port=privacy,
+        sql_port=storage.relational,
+        graph_port=storage.graph,
+        privacy_port=infra.privacy,
         data_dir=rag_data_dir,
     )
+
+    # ── 工具 ──
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
-    
+
+    # ── 记忆 ──
     memory = _build_memory_port(
         config_dir=config_dir,
         data_dir=data_dir,
-        archive_db=relational,
-        privacy=privacy,
+        archive_db=storage.relational,
+        privacy=infra.privacy,
         skills=skills,
-        cache=cache,
+        cache=storage.cache,
         models=models,
         store_dir_override=f"{data_dir}/memory_dev",
-        object_store=object_store,
+        object_store=storage.object_store,
         index_port=index_port,
-        secret=secret,
+        secret=infra.secret,
     )
 
     from agent_platform.memory.memory_tool_registration import register_memory_tools
-
     register_memory_tools(tools, memory)
 
-    turn_buffer = build_turn_buffer(memory, mem_cfg)
-    checkpointer = build_checkpointer(relational)
-
-    return RunContext(
+    return _assemble_run_context(
         request=request,
-        rag=rag,
-        index=index_port,
-        knowledge_base=knowledge_base,
-        memory=memory,
+        config_dir=config_dir,
+        data_dir=data_dir,
+        models=models,
         tools=tools,
         skills=skills,
         mcp=mcp,
-        models=models,
-        policy=policy,
-        privacy=privacy,
-        observability=observability,
-        identity=identity,
-        turn_buffer=turn_buffer,
-        checkpointer=checkpointer,
+        infra=infra,
+        storage=storage,
+        rag=rag,
+        index_port=index_port,
+        knowledge_base=knowledge_base,
+        memory=memory,
+        mem_cfg=mem_cfg,
         extra={
-            "config": config,
-            "secret": secret,
-            "cache": cache,
-            "relational": relational,
-            "graph": graph,
-            "object_store": object_store,
-            "vector_port": vector_port,
+            "config": infra.config,
+            "secret": infra.secret,
+            "cache": storage.cache,
+            "relational": storage.relational,
+            "graph": storage.graph,
+            "object_store": storage.object_store,
+            "vector_port": dev_vector,
             "rag_chroma_dir": chroma_dir,
             "rag_tenant_id": None,
             "data_dir": data_dir,
-        }
+        },
     )

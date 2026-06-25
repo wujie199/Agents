@@ -70,7 +70,31 @@ flowchart LR
 - **主路径（L7 节点里该写的）** — 业务步骤：解析文档、调 Router、并行写章、合并。  
 - **场务（Middleware / Callback）** — 日志、耗时、追踪、脱敏、鉴权、审计、指标、重试策略。  
 
-原则：**节点函数尽量短**；工程能力用包装器挂在节点和 LLM 链上（对齐现有 `middleware_log`、`callback_log`，迁到 `runtime/middleware` 与 `observability/callbacks`）。
+原则：**节点函数尽量短**；工程能力用包装器挂在节点和 LLM 链上（对齐现有 `middleware_log`、`callback_log`，迁到 `app/agents/middleware` 与 `observability/callbacks`）。
+
+#### Middleware 体系（v2 已实现）
+
+位于 `app/agents/middleware/`，洋葱模型包裹图节点：
+
+| Middleware | 职责 | 文件 |
+|-----------|------|------|
+| TracingMiddleware | trace_id + span 注入，节点耗时 | `tracing.py` |
+| PolicyMiddleware | ACL / QPS 限流 | `policy.py` |
+| LoggingMiddleware | 节点进入/退出/耗时日志 | `logging.py` |
+| PrivacyMiddleware | PII 检测/脱敏（手机/身份证/邮箱/银行卡） | `privacy.py` |
+| AuditMiddleware | 关键字段 hash 审计日志 | `audit.py` |
+
+使用方式：`build_chat_langgraph_workflow` 中通过 `wrap_node(middlewares, node_fn, node_name)` 自动包裹 `prepare`、`agent`、`persist` 三个图节点。
+
+#### v2 新特性一览
+
+| 特性 | 模块位置 | 状态 |
+|------|---------|------|
+| 证据融合 | `app/agents/roles/evidence_fusion.py` | 已接入 `chat_nodes.build_turn_messages` |
+| 冲突检测 | `app/agents/memory/conflict_detector.py` | 已接入 L1 写入流程（finalize + name_remember + confirm） |
+| 时间衰减 | `agent_platform/memory/adapters/time_decay.py` | 已接入 `memory_port_adapter` |
+| Middleware | `app/agents/middleware/` | 已接入 `graph_def` 图节点 |
+| DeepAgent 路由 | `app/runtime/adapters/deepagents/` | 已接入 REPL 主循环 |
 
 ### 0.6 想快的时候：三种「并行」（详见 9.7 节）
 

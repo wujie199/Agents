@@ -17,8 +17,8 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from core.composition.run_context import RunContext
 
-from app.agents.llm_stream import stream_llm_text
-from app.agents.react_loop import _extract_llm_text
+from app.agents.prompts.llm_stream import stream_llm_text, stream_llm_chunks
+from app.agents.roles.react_loop import _extract_llm_text
 
 
 def _message_to_dict(msg: BaseMessage) -> dict[str, Any]:
@@ -224,8 +224,17 @@ class PortChatModel(BaseChatModel):
 
         dict_messages = [_message_to_dict(m) for m in messages]
         llm = self.run_ctx.get_model(self.model_role)
-        async for delta in stream_llm_text(llm, dict_messages):
-            chunk = AIMessageChunk(content=delta)
+        async for content_delta, reasoning_delta in stream_llm_chunks(
+            llm, dict_messages
+        ):
+            additional_kwargs = {}
+            if reasoning_delta:
+                additional_kwargs["reasoning_content"] = reasoning_delta
+            chunk = AIMessageChunk(
+                content=content_delta,
+                additional_kwargs=additional_kwargs,
+            )
             yield ChatGenerationChunk(message=chunk)
-            if run_manager:
-                await run_manager.on_llm_new_token(delta)
+            token_text = content_delta or reasoning_delta
+            if run_manager and token_text:
+                await run_manager.on_llm_new_token(token_text)

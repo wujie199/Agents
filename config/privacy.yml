@@ -1,21 +1,20 @@
-# 脱敏规则配置
-patterns:
-  phone: "1[3-9]\\d{9}"
-  email: "[\\w\\.-]+@[\\w\\.-]+\\.\\w+"
-  id_card: "\\d{17}[\\dXx]"
-  bank_card: "\\d{16,19}"
+# 隐私脱敏规则配置
+# 用于 PrivacyPortAdapter 的 PII 检测与脱敏
+privacy:
+  # PII 检测正则
+  patterns:
+    phone: "1[3-9]\\d{9}"
+    email: "[\\w\\.-]+@[\\w\\.-]+\\.\\w+"
+    id_card: "\\d{17}[\\dXx]"
+    bank_card: "\\d{16,19}"
 
-# 缓存策略
-cache:
-  # PII 内容是否允许缓存
-  allow_pii_cache: false
-  # 敏感内容的 TTL 系数（相对默认 TTL）
-  secret_ttl_factor: 0
-  pii_ttl_factor: 0.33
-
-# 出域策略
-exfil:
-  # 是否对发送给 LLM 的内容脱敏
-  redact_for_llm: false
-  # 是否对 MCP 出站内容脱敏
-  redact_for_mcp: true
+  # 敏感度分级
+  sensitivity:
+    # 身份证、银行卡 → SECRET（不可缓存）
+    secret_patterns:
+      - id_card
+      - bank_card
+    # 手机、邮箱 → PII（短缓存）
+    pii_patterns:
+      - phone
+      - email

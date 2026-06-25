@@ -30,7 +30,7 @@ from agent_platform.memory.adapters.skill_memory_adapter import SkillMemoryAdapt
 from agent_platform.memory.adapters.summarizer_adapter import TruncatingSummarizerAdapter
 from agent_platform.memory.adapters.session_search_fusion import rrf_merge_messages
 from agent_platform.memory.adapters.session_rerank_utils import rerank_message_dicts
-from app.agents.text_sanitize import (
+from app.agents.prompts.text_sanitize import (
     has_model_reasoning,
     sanitize_search_fragment_content,
     strip_model_reasoning,
@@ -92,6 +92,8 @@ class MemoryPortAdapter:
         external_merge_on_finalize: bool = True,
         purge_delete_external_audit: bool = True,
         purge_tenant_l4_strip_user_keys: bool = True,
+        time_decay: bool = True,
+        time_decay_half_life_days: float = 90.0,
     ):
         self._archive_db = archive_db
         self._index_port = index_port
@@ -119,6 +121,8 @@ class MemoryPortAdapter:
         self._external_merge_on_finalize = external_merge_on_finalize
         self._purge_delete_external_audit = purge_delete_external_audit
         self._purge_tenant_l4_strip_user_keys = purge_tenant_l4_strip_user_keys
+        self._time_decay_enabled = time_decay
+        self._time_decay_half_life_days = time_decay_half_life_days
 
         self._hot = hot_memory or HotMemoryFileAdapter(
             store_dir=store_dir,
@@ -777,6 +781,24 @@ class MemoryPortAdapter:
             )
 
         selected = fragments[:limit]
+        # 时间衰减：近期结果权重高于远期
+        if self._time_decay_enabled:
+            from agent_platform.memory.adapters.time_decay import (
+                apply_time_decay_to_fragments,
+            )
+
+            frag_dicts = [
+                {"ts": f.ts, "score": f.score, "idx": i}
+                for i, f in enumerate(selected)
+            ]
+            decayed = apply_time_decay_to_fragments(
+                frag_dicts,
+                half_life_days=self._time_decay_half_life_days,
+            )
+            # 按衰减后分数重排
+            idx_order = [d["idx"] for d in decayed]
+            selected = [selected[i] for i in idx_order if i < len(selected)]
+
         if use_llm_summary is False:
             user_frags = [f for f in fragments if f.role == "user"]
             if user_frags:

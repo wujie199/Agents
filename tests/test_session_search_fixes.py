@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import (
     is_empty_session_search_text,
     prefetch_l4_profile,

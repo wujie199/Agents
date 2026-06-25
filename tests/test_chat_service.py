@@ -10,14 +10,14 @@ import pytest
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.chat_service import (
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_service import (
     ChatSessionHandle,
     execute_chat_turn,
     stream_chat_turn_events,
 )
 
-from app.agents.chat_turn import ChatTurnResult
+from app.agents.orchestration.chat_turn import ChatTurnResult
 
 
 def _handle() -> ChatSessionHandle:
@@ -40,7 +40,7 @@ async def test_execute_chat_turn_direct():
     handle = _handle()
     mock_result = ChatTurnResult(assistant_text="ok", evidence_count=0)
     with patch(
-        "app.agents.chat_service.run_chat_turn",
+        "app.agents.orchestration.chat_service.run_chat_turn",
         new=AsyncMock(return_value=mock_result),
     ) as mock_run:
         result = await execute_chat_turn(handle, "hi", engine="direct")
@@ -58,7 +58,7 @@ async def test_stream_chat_turn_events():
         history_turns=3,
     )
     with patch(
-        "app.agents.chat_service.execute_chat_turn",
+        "app.agents.orchestration.chat_service.execute_chat_turn",
         new=AsyncMock(return_value=mock_result),
     ):
         events = [
@@ -78,17 +78,17 @@ async def test_stream_chat_turn_events():
 async def test_stream_token_mode_direct():
     handle = _handle()
     with patch(
-        "app.agents.chat_service.build_turn_messages",
+        "app.agents.orchestration.chat_service.build_turn_messages",
         new=AsyncMock(
             return_value=([{"role": "user", "content": "hi"}], 1, False, "abc123")
         ),
     ), patch(
-        "app.agents.chat_service.stream_llm_text",
+        "app.agents.orchestration.chat_service.stream_llm_text",
     ) as mock_stream, patch(
-        "app.agents.chat_service.persist_user_and_assistant",
+        "app.agents.orchestration.chat_service.persist_user_and_assistant",
         new=AsyncMock(),
     ), patch(
-        "app.agents.chat_nodes.fetch_turn_history",
+        "app.agents.orchestration.chat_nodes.fetch_turn_history",
         new=AsyncMock(return_value=[]),
     ):
         async def _gen(*_a, **_k):

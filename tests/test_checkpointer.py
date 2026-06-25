@@ -8,7 +8,7 @@ from agent_platform.storage.adapters.sqlite.relational_adapter import (
 from agent_platform.memory.adapters.relational_checkpointer_adapter import (
     RelationalCheckpointerAdapter,
 )
-from app.agents.react_loop import end_agent_session
+from app.agents.roles.react_loop import end_agent_session
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_end_agent_session_default_checkpoint_state(tmp_path):
         memory=_FakeMemory(),
         checkpointer=checkpointer,
     )
-    from app.agents.chat_config import ChatAgentConfig
+    from app.agents.orchestration.chat_config import ChatAgentConfig
 
     await end_agent_session(
         ctx,

@@ -12,9 +12,9 @@ from core.composition.run_context import RunContext
 from core.composition.factory import FakeModelPort
 from core.ports.memory import PromptMemorySnapshot, TurnRecord
 
-from app.agents.prompt_builder import build_chat_messages, format_evidence_bundle
-from app.agents.chat_turn import run_chat_turn
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.prompts.prompt_builder import build_chat_messages, format_evidence_bundle
+from app.agents.orchestration.chat_turn import run_chat_turn
+from app.agents.orchestration.chat_config import ChatAgentConfig
 
 
 def test_format_evidence_bundle_empty():

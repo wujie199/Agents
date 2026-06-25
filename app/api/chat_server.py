@@ -30,24 +30,24 @@ from agent_platform.infrastructure.observability.adapter import (
     ObservabilityPortAdapter,
 )
 
-from app.agents.chat_config import ChatAgentConfig, load_chat_config
-from app.agents.chat_service import (
+from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
+from app.agents.orchestration.chat_service import (
     ChatSessionHandle,
     execute_chat_turn,
     format_sse,
     get_l1_snapshot,
     stream_chat_turn_events,
 )
-from app.agents.memory_views import list_pending_l1_deltas
-from app.agents.memory_metrics import (
+from app.agents.memory.memory_views import list_pending_l1_deltas
+from app.agents.memory.memory_metrics import (
     get_memory_metric_stats,
     get_memory_metric_stats_from_obs,
     prometheus_text,
 )
 from app.api.rate_limit import create_chat_rate_limiter
 from app.agents.context_factory import ChatProfile, build_chat_run_context
-from app.agents.memory_bootstrap import bootstrap_memory_runtime
-from app.agents.react_loop import end_agent_session
+from app.agents.memory.memory_bootstrap import bootstrap_memory_runtime
+from app.agents.roles.react_loop import end_agent_session
 
 try:
     from fastapi import Depends, FastAPI, HTTPException
@@ -160,7 +160,7 @@ class ChatSessionRegistry:
 
             handle = ChatSessionHandle(run_ctx=run_ctx, chat_cfg=chat_cfg)
             if engine == "langgraph":
-                from app.agents.chat_langgraph import (
+                from app.agents.orchestration.chat_langgraph import (
                     create_chat_langgraph_session_async,
                 )
 
@@ -217,7 +217,7 @@ def create_app(
     memory_admin_dep = (
         [Depends(verify_memory_admin_key)] if verify_memory_admin_key else []
     )
-    from app.agents.memory_runtime_debug import set_memory_runtime_debug
+    from app.agents.memory.memory_runtime_debug import set_memory_runtime_debug
 
     if os.environ.get("MEMORY_RUNTIME_DEBUG", "").lower() in ("1", "true", "yes", "on"):
         set_memory_runtime_debug(True)
@@ -379,6 +379,21 @@ def create_app(
         memory_admin_dep=memory_admin_dep,
     )
     app.include_router(memory_router)
+
+    # ── RAG 知识库路由 ──
+    try:
+        from app.api.rag_routes import create_rag_router
+
+        rag_router = create_rag_router(
+            config_dir=config_dir,
+            data_dir=data_dir,
+            enforce_rate_limit=_enforce_rate_limit,
+            auth_dep=auth_dep,
+        )
+        app.include_router(rag_router)
+    except Exception as exc:
+        import logging
+        logging.getLogger("chat_server").warning("RAG 路由注册失败（可选）: %s", exc)
 
     return app
 

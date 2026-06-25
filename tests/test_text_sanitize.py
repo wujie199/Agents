@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.agents.context_builder import is_allowed_l1_value
-from app.agents.text_sanitize import (
+from app.agents.prompts.text_sanitize import (
     sanitize_memory_text_for_chat,
     sanitize_search_fragment_content,
     strip_model_reasoning,
@@ -40,7 +40,7 @@ def test_is_allowed_l1_value_rejects_auto_json():
 
 
 def test_sanitize_turn_content_strips_json_for_assistant():
-    from app.agents.text_sanitize import sanitize_turn_content
+    from app.agents.prompts.text_sanitize import sanitize_turn_content
 
     raw = '前言\n```json\n{"a":1}\n```\n后文'
     out = sanitize_turn_content(raw, role="assistant")

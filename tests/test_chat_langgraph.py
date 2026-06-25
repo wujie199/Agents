@@ -11,8 +11,8 @@ from core.composition.run_context import RunContext
 from core.composition.factory import FakeModelPort
 from core.ports.memory import PromptMemorySnapshot
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.chat_langgraph import (
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_langgraph import (
     create_chat_langgraph_session,
     run_chat_turn_langgraph,
 )

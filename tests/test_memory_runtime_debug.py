@@ -7,7 +7,7 @@ import pytest
 from core.composition.run_context import RunContext
 from core.domain.context import RequestContext
 
-from app.agents.memory_runtime_debug import (
+from app.agents.memory.memory_runtime_debug import (
     collect_memory_runtime_status,
     set_memory_runtime_debug,
 )
@@ -49,7 +49,7 @@ async def test_collect_memory_runtime_status_verbose(tmp_path, monkeypatch):
         async def list_turns(self, req, limit=10):
             return [{"role": "user", "content": "hi", "ts": "now"}]
 
-    from app.agents.memory_runtime_debug import (
+    from app.agents.memory.memory_runtime_debug import (
         collect_memory_runtime_status,
         set_memory_runtime_verbose,
     )
@@ -77,7 +77,7 @@ async def test_collect_memory_runtime_status_verbose(tmp_path, monkeypatch):
 
 
 def test_resolve_memory_trace_dev_off_by_default():
-    from app.agents.memory_runtime_debug import resolve_memory_trace
+    from app.agents.memory.memory_runtime_debug import resolve_memory_trace
 
     on, console = resolve_memory_trace(profile="dev")
     assert on is False
@@ -85,7 +85,7 @@ def test_resolve_memory_trace_dev_off_by_default():
 
 
 def test_resolve_memory_trace_debug_flag():
-    from app.agents.memory_runtime_debug import resolve_memory_trace
+    from app.agents.memory.memory_runtime_debug import resolve_memory_trace
 
     on, console = resolve_memory_trace(profile="dev", debug=True)
     assert on is True
@@ -93,7 +93,7 @@ def test_resolve_memory_trace_debug_flag():
 
 
 def test_resolve_memory_trace_no_debug():
-    from app.agents.memory_runtime_debug import resolve_memory_trace
+    from app.agents.memory.memory_runtime_debug import resolve_memory_trace
 
     on, console = resolve_memory_trace(profile="dev", no_debug=True)
     assert on is False
@@ -101,7 +101,7 @@ def test_resolve_memory_trace_no_debug():
 
 
 def test_format_detailed_l4_dict_facts():
-    from app.agents.memory_runtime_debug import format_memory_runtime_detailed
+    from app.agents.memory.memory_runtime_debug import format_memory_runtime_detailed
 
     data = {
         "event": "test",
@@ -133,7 +133,7 @@ async def test_log_writes_when_enabled(tmp_path, monkeypatch):
     log_file = tmp_path / "mem-debug.log"
     monkeypatch.setenv("MEMORY_DEBUG_LOG", str(log_file))
     set_memory_runtime_debug(True)
-    from app.agents.memory_runtime_debug import log_memory_runtime_status
+    from app.agents.memory.memory_runtime_debug import log_memory_runtime_status
 
     ctx = RunContext(
         request=RequestContext(
@@ -155,7 +155,7 @@ async def test_log_force_without_enabled(tmp_path, monkeypatch):
     log_file = tmp_path / "mem-force.log"
     monkeypatch.setenv("MEMORY_DEBUG_LOG", str(log_file))
     set_memory_runtime_debug(False)
-    from app.agents.memory_runtime_debug import log_memory_runtime_status
+    from app.agents.memory.memory_runtime_debug import log_memory_runtime_status
 
     ctx = RunContext(
         request=RequestContext(

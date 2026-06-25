@@ -22,27 +22,33 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.domain.context import RequestContext
 from app.agents.context_factory import build_chat_run_context
-from app.agents.memory_bootstrap import bootstrap_memory_runtime
+from app.agents.memory.memory_bootstrap import bootstrap_memory_runtime
 
-from app.agents.chat_config import load_chat_config
-from app.agents.chat_service import (
+from app.agents.orchestration.chat_config import load_chat_config
+from app.agents.orchestration.chat_service import (
     ChatSessionHandle,
     execute_chat_turn,
     stream_chat_turn_events,
 )
-from app.agents.chat_langgraph import create_chat_langgraph_session_async
-from app.agents.memory_metrics import get_memory_metric_stats, prometheus_text
-from app.agents.memory_views import list_pending_l1_deltas
-from app.agents.enterprise_memory import (
+from app.agents.orchestration.chat_langgraph import create_chat_langgraph_session_async
+from app.agents.memory.memory_metrics import get_memory_metric_stats, prometheus_text
+from app.agents.memory.memory_views import list_pending_l1_deltas
+from app.agents.memory.enterprise_memory import (
     confirm_pending_l1,
     format_finalize_summary,
     get_memory_status,
     list_user_sessions_enriched,
     refresh_l4_profile,
 )
-from app.agents.react_loop import end_agent_session
-from app.agents.debug_trace import agent_debug, agent_debug_log_path, set_debug_console, set_debug_quiet
-from app.agents.memory_runtime_debug import (
+from app.agents.roles.react_loop import end_agent_session
+from app.agents.debug.debug_trace import agent_debug, agent_debug_log_path, set_debug_console, set_debug_quiet
+
+# DeepAgent 路由门控（可选依赖，enable=false 时不走）
+from app.runtime.adapters.deepagents.config import load_deep_agent_config, DeepAgentConfig
+from app.runtime.adapters.deepagents.routing_gate import should_use_deep_agent, should_use_deep_agent_async
+from app.runtime.adapters.deepagents.adapter import DeepAgentAdapter
+from app.runtime.adapters.deepagents import is_deep_agents_available
+from app.agents.memory.memory_runtime_debug import (
     collect_memory_runtime_status,
     debug_log_path,
     format_layer_triggers,
@@ -74,6 +80,9 @@ HELP = """
   /rag-cache-test [问题]    同一问题连调两次 RAG，验证 route_and_retrieve 缓存 HIT
   /redis-health             打印 Redis 缓存适配器 health + stats
   /metrics                  记忆子系统指标（ObservabilityPort）
+  /todos                    查看 DeepAgent 规划任务列表（TodoList）
+  /conflicts                查看当前 L1 冲突检测结果
+  /decay-info               查看时间衰减配置和效果预览
   /new [session_id]         切换新会话（清空 L2 上下文，可选自定义 id）
   /help                     本帮助
   /quit, /q, exit           结束会话（L4→L1 finalize）
@@ -312,7 +321,7 @@ async def _handle_line(
             return True
         import time
 
-        from app.agents.chat_nodes import retrieve_rag_bundle
+        from app.agents.orchestration.chat_nodes import retrieve_rag_bundle
 
         parts = line.split(maxsplit=1)
         probe_query = (
@@ -360,11 +369,90 @@ async def _handle_line(
         print()
         return True
 
+    if line == "/todos":
+        da_config = load_deep_agent_config()
+        if not da_config.enable_deep_agent:
+            print("\n（DeepAgent 未启用，chat.yml 中 deep_agent.enable=true 开启）\n")
+            return True
+        if not is_deep_agents_available():
+            print("\n（deepagents 未安装，pip install 'agents[planning]'）\n")
+            return True
+        try:
+            da_adapter = DeepAgentAdapter(run_ctx, da_config)
+            todos = await da_adapter.get_todos()
+            if not todos:
+                print("\n（无规划任务）\n")
+                return True
+            print("\n--- DeepAgent TodoList ---")
+            for i, t in enumerate(todos, 1):
+                status = t.get("status", "?")
+                desc = t.get("description", "")
+                deps = t.get("depends_on") or []
+                dep_str = f"  ← {','.join(str(d) for d in deps)}" if deps else ""
+                print(f"  {i}. [{status}] {desc}{dep_str}")
+            print()
+        except Exception as exc:
+            print(f"\n[error] 获取 TodoList 失败: {exc}\n")
+        return True
+
+    if line == "/conflicts":
+        from app.agents.memory.conflict_detector import (
+            check_l1_write_conflicts,
+            is_values_conflicting,
+            ConflictStrategy,
+        )
+        memory = run_ctx.require_memory()
+        pending = list_pending_l1_deltas(run_ctx)
+        if not pending:
+            print("\n（无 pending L1，无冲突可检测）\n")
+            return True
+        try:
+            snap = memory.compose_prompt_snapshot(req)
+            existing_facts: dict[str, str] = {}
+            for ln in (snap.memory_text or "").split("\n"):
+                ln = ln.strip()
+                if ": " in ln:
+                    k, v = ln.split(": ", 1)
+                    existing_facts[k.strip()] = v.strip()
+        except Exception:
+            existing_facts = {}
+        records = check_l1_write_conflicts(
+            existing_facts,
+            [{"key": d.get("key"), "value": d.get("value")} for d in pending],
+            strategy=ConflictStrategy(chat_cfg.l1_conflict_strategy),
+            l1_auto_write_confidence_min=chat_cfg.l1_auto_write_confidence_min,
+        )
+        conflicts = [r for r in records if is_values_conflicting(r.old_value, r.new_value)]
+        if not conflicts:
+            print(f"\n--- L1 冲突检测：{len(records)} 条 pending，无冲突 ---\n")
+            return True
+        print(f"\n--- L1 冲突检测：{len(conflicts)}/{len(records)} 条冲突 ---")
+        for r in conflicts:
+            print(f"  [{r.strategy}] {r.key}: '{r.old_value}' → '{r.new_value}' → resolved='{r.resolved_value}' (HITL={r.needs_hitl})")
+        print()
+        return True
+
+    if line == "/decay-info":
+        from agent_platform.memory.adapters.time_decay import time_decay_factor
+        from datetime import datetime, timezone, timedelta
+        print(f"\n--- 时间衰减配置 ---")
+        print(f"  enabled: {chat_cfg.time_decay}")
+        print(f"  half_life_days: {chat_cfg.time_decay_half_life_days}")
+        if chat_cfg.time_decay:
+            now = datetime.now(timezone.utc)
+            print(f"\n  衰减预览（half_life={chat_cfg.time_decay_half_life_days}天）:")
+            for days in (1, 7, 30, 90, 180, 365):
+                ts = (now - timedelta(days=days)).isoformat()
+                factor = time_decay_factor(ts, now=now, half_life_days=chat_cfg.time_decay_half_life_days)
+                print(f"    {days:>3}天前 → 衰减因子 {factor:.4f}")
+        print()
+        return True
+
     if line == "/new" or line.startswith("/new "):
         import uuid
         from dataclasses import replace
 
-        from app.agents.chat_langgraph import create_chat_langgraph_session_async
+        from app.agents.orchestration.chat_langgraph import create_chat_langgraph_session_async
 
         parts = line.split(maxsplit=1)
         new_sid = (
@@ -376,7 +464,7 @@ async def _handle_line(
         session_handle.run_ctx = replace(run_ctx, request=new_req)
         session_handle.lg_session = None
         if engine == "langgraph":
-            from app.agents.chat_langgraph import create_chat_langgraph_session_async
+            from app.agents.orchestration.chat_langgraph import create_chat_langgraph_session_async
 
             session_handle.lg_session = await create_chat_langgraph_session_async(
                 session_handle.run_ctx, chat_cfg=chat_cfg
@@ -386,6 +474,41 @@ async def _handle_line(
         return True
 
     pending_before = len(list_pending_l1_deltas(run_ctx))
+
+    # ── DeepAgent 路由门控 ──
+    da_config = load_deep_agent_config()
+    if should_use_deep_agent(line, chat_cfg, da_config):
+        try:
+            from app.runtime.adapters.deepagents.subagent_bridge import InnerSubAgentBridge
+            compiled = getattr(session_handle, "lg_session", None)
+            if compiled is not None and is_deep_agents_available():
+                bridge = InnerSubAgentBridge(
+                    compiled_graph=compiled,
+                    runtime=None,
+                    name="chat-worker",
+                    description="执行单轮对话",
+                )
+                da_adapter = DeepAgentAdapter(run_ctx, da_config, inner_bridge=bridge)
+                da_result = await da_adapter.invoke(line)
+                da_text = da_result.get("assistant_text") or ""
+                da_todos = da_result.get("todos") or []
+                if da_text:
+                    print(f"\nassistant>  (DeepAgent 规划层)\n{da_text}\n")
+                if da_todos:
+                    print(f"  [todos] {len(da_todos)} 个任务:")
+                    for t in da_todos:
+                        status = t.get("status", "?")
+                        desc = t.get("description", "")
+                        print(f"    [{status}] {desc}")
+                    print()
+                if not da_text and not da_todos:
+                    print("\n[DeepAgent] 规划完成但无输出\n")
+                _print_pending_hint(run_ctx, pending_before)
+                return True
+            else:
+                print(f"\n[DeepAgent] 已触发但 deepagents 未安装或会话未初始化，回退内层图\n")
+        except Exception as exc:
+            print(f"\n[DeepAgent error] {exc}，回退内层图\n")
 
     try:
         if stream_output:
@@ -588,7 +711,7 @@ async def chat_repl(
     )
     await log_memory_runtime_status(run_ctx, event="startup", console=debug)
     if trace_on:
-        from app.agents.memory_runtime_debug import (
+        from app.agents.memory.memory_runtime_debug import (
             chat_config_verify_snapshot,
             trace_write,
         )

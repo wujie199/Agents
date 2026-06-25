@@ -1,5 +1,7 @@
 from typing import Optional, Any
 import yaml
+import time
+import threading
 from pathlib import Path
 from core.ports.policy import PolicyResult
 from dataclasses import dataclass
@@ -14,12 +16,17 @@ class PolicyConfig:
     max_batch_size: int = 50
     max_rag_batch_queries: int = 10
     max_embed_batch_size: int = 32
+    max_qps_per_tenant: int = 100
+    token_budget_per_user: int = 100000
 
 
 class PolicyPortAdapter:
     def __init__(self, config_path: Optional[str] = None):
         self._default_config = PolicyConfig()
         self._tenant_configs: dict[str, PolicyConfig] = {}
+        # QPS 限流：tenant → (timestamps)
+        self._qps_tracker: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
         
         if config_path:
             self._load_config(config_path)
@@ -64,6 +71,20 @@ class PolicyPortAdapter:
         user_id: str,
         action: str
     ) -> PolicyResult:
+        config = self._get_config(tenant_id)
+        if config.max_qps_per_tenant <= 0:
+            return PolicyResult(allowed=True)
+        now = time.monotonic()
+        with self._lock:
+            calls = self._qps_tracker.setdefault(tenant_id, [])
+            calls[:] = [t for t in calls if now - t < 1.0]
+            if len(calls) >= config.max_qps_per_tenant:
+                return PolicyResult(
+                    allowed=False,
+                    reason=f"QPS limit exceeded: {len(calls)}/{config.max_qps_per_tenant}",
+                    suggested_value=config.max_qps_per_tenant,
+                )
+            calls.append(now)
         return PolicyResult(allowed=True)
     
     def check_token_budget(
@@ -72,6 +93,13 @@ class PolicyPortAdapter:
         user_id: str,
         requested_tokens: int
     ) -> PolicyResult:
+        config = self._get_config(tenant_id)
+        if requested_tokens > config.token_budget_per_user:
+            return PolicyResult(
+                allowed=False,
+                reason=f"Token budget exceeded: {requested_tokens}/{config.token_budget_per_user}",
+                suggested_value=config.token_budget_per_user,
+            )
         return PolicyResult(allowed=True)
     
     def get_max_parallel_sends(self, tenant_id: str) -> int:

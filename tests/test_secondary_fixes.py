@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import (
     compress_history_for_knowledge,
     dedupe_history_turns,
 )
-from app.agents.retrieval_router import should_use_direct_llm_for_intent
+from app.agents.roles.retrieval_router import should_use_direct_llm_for_intent
 
 
 def test_dedupe_history_turns_consecutive():

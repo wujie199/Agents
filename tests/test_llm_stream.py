@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.agents.llm_stream import extract_stream_delta, stream_llm_text
+from app.agents.prompts.llm_stream import extract_stream_delta, stream_llm_text
 
 
 def test_extract_stream_delta_openai_chunk():

@@ -12,9 +12,9 @@ from core.composition.factory import FakeModelPort
 from core.domain.evidence import Evidence, EvidenceBundle, SourceType
 from core.ports.memory import PromptMemorySnapshot
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.chat_turn import run_chat_turn
-from app.agents.react_turn import dict_messages_to_lc, last_ai_text
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_turn import run_chat_turn
+from app.agents.roles.react_turn import dict_messages_to_lc, last_ai_text
 
 
 def test_dict_messages_to_lc_roles():
@@ -74,7 +74,7 @@ async def test_run_chat_turn_uses_react_when_tools_enabled():
     )
 
     with patch(
-        "app.agents.chat_turn.invoke_react_agent",
+        "app.agents.orchestration.chat_turn.invoke_react_agent",
         new=AsyncMock(return_value="ReAct 回复"),
     ) as mock_react:
         result = await run_chat_turn(ctx, "问题", chat_cfg=cfg)

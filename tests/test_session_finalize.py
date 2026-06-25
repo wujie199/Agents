@@ -9,8 +9,8 @@ import pytest
 from core.composition.run_context import RunContext
 from core.domain.context import RequestContext
 
-from app.agents.chat_config import ChatAgentConfig
-from app.agents.session_finalize import enrich_l1_before_finalize
+from app.agents.orchestration.chat_config import ChatAgentConfig
+from app.agents.memory.session_finalize import enrich_l1_before_finalize
 
 
 def _ctx() -> RunContext:
@@ -50,10 +50,10 @@ async def test_enrich_l1_writes_extracted_facts():
         {"role": "assistant", "content": "好的"},
     ]
     with patch(
-        "app.agents.session_finalize.fetch_turn_history",
+        "app.agents.memory.session_finalize.fetch_turn_history",
         new=AsyncMock(return_value=turns),
     ), patch(
-        "app.agents.session_finalize.extract_l1_facts_from_session",
+        "app.agents.memory.session_finalize.extract_l1_facts_from_session",
         new=AsyncMock(return_value=[{"key": "称呼", "value": "老王"}]),
     ):
         n = await enrich_l1_before_finalize(ctx, cfg)
@@ -66,10 +66,10 @@ async def test_enrich_l1_filters_invalid_keys():
     ctx = _ctx()
     cfg = ChatAgentConfig(enable_l1_extract_on_finalize=True)
     with patch(
-        "app.agents.session_finalize.fetch_turn_history",
+        "app.agents.memory.session_finalize.fetch_turn_history",
         new=AsyncMock(return_value=[{"role": "user", "content": "x"}]),
     ), patch(
-        "app.agents.session_finalize.extract_l1_facts_from_session",
+        "app.agents.memory.session_finalize.extract_l1_facts_from_session",
         new=AsyncMock(return_value=[{"key": "密码", "value": "123"}]),
     ):
         n = await enrich_l1_before_finalize(ctx, cfg)

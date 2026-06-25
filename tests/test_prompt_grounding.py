@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from core.domain.evidence import Evidence, EvidenceBundle, SourceType
 
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import _format_turns_for_summary
-from app.agents.prompt_builder import (
+from app.agents.prompts.prompt_builder import (
     EVIDENCE_GROUNDING_RULES,
     format_evidence_bundle,
     build_chat_messages,

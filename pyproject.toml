@@ -20,6 +20,9 @@ langgraph = [
   "langgraph-checkpoint-sqlite>=2.0",
   "langgraph-checkpoint-postgres>=2.0",
 ]
+planning = [
+  "deepagents>=0.6,<0.7",
+]
 api = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",

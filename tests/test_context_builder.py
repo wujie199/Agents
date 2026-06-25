@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import (
     compress_history_for_knowledge,
     is_cross_session_recall,

@@ -221,8 +221,24 @@ def build_run_context(
     privacy=None,
     observability=None,
     identity=None,
+    config_dir: str = "config",
     **extra
 ) -> RunContext:
+    # 延迟加载 Policy/Privacy 适配器
+    if policy is None:
+        try:
+            from agent_platform.infrastructure.policy.adapter import PolicyPortAdapter
+            policy = PolicyPortAdapter(config_path=f"{config_dir}/concurrency.yml")
+        except Exception:
+            policy = FakePolicyPort()
+
+    if privacy is None:
+        try:
+            from agent_platform.infrastructure.privacy.adapter import PrivacyPortAdapter
+            privacy = PrivacyPortAdapter(rules_path=f"{config_dir}/privacy.yml")
+        except Exception:
+            privacy = FakePrivacyPort()
+
     return RunContext(
         request=request,
         rag=rag,
@@ -231,8 +247,8 @@ def build_run_context(
         skills=skills,
         mcp=mcp,
         models=models or FakeModelPort(),
-        policy=policy or FakePolicyPort(),
-        privacy=privacy or FakePrivacyPort(),
+        policy=policy,
+        privacy=privacy,
         observability=observability or FakeObservabilityPort(),
         identity=identity or FakeIdentityPort(),
         extra=extra

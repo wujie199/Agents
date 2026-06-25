@@ -21,7 +21,7 @@ profiles:
     api_key_env: LOCAL_LLM_API_KEY
     base_url: http://127.0.0.1:11434/v1
     base_url_env: LOCAL_LLM_BASE_URL
-    timeout: 120
+    timeout: 8
 
   dashscope_main:
     provider: dashscope

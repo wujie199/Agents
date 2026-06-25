@@ -1,11 +1,3 @@
-from typing import Protocol
+"""向后兼容重导出 — 所有符号已移至 core.ports.memory.hot。"""
 
-
-class HotMemoryCompressor(Protocol):
-    """L1 超预算压缩契约（LLM 或截断）。"""
-
-    async def compress_memory(self, content: str, max_chars: int) -> str:
-        ...
-
-    async def compress_user(self, content: str, max_chars: int) -> str:
-        ...
+from core.ports.memory.hot import HotMemoryCompressor  # noqa: F401

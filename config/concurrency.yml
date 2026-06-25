@@ -1,9 +1,5 @@
-# 并发与批处理配置
-chat:
-  enabled: true
-  tenant_requests_per_minute: 60
-  user_requests_per_minute: 20
-  # 分布式限流（可选）：export CHAT_RATE_LIMIT_REDIS_URL=redis://localhost:6379/0
+# 并发策略配置
+# 用于 PolicyPortAdapter 的限流与预算控制
 
 default:
   max_parallel_sends: 5
@@ -13,10 +9,14 @@ default:
   max_batch_size: 50
   max_rag_batch_queries: 10
   max_embed_batch_size: 32
+  # QPS 限流
+  max_qps_per_tenant: 100
+  # Token 预算
+  token_budget_per_user: 100000
 
-# 租户级覆盖（可选）
-tenants:
-  tenant_premium:
-    max_parallel_sends: 10
-    default_batch_size: 20
-    max_batch_size: 100
+# 租户级覆盖（示例）
+# tenants:
+#   vip_tenant:
+#     max_qps_per_tenant: 500
+#     token_budget_per_user: 500000
+#     max_parallel_sends: 10

@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
     BaseModel = object  # type: ignore[misc, assignment]
     Field = lambda *a, **k: None  # type: ignore[misc, assignment]
 
-from app.agents.enterprise_memory import (
+from app.agents.memory.enterprise_memory import (
     confirm_pending_l1,
     get_memory_status,
     list_user_sessions_enriched,
@@ -26,7 +26,7 @@ from app.agents.enterprise_memory import (
     purge_user_memory,
     run_retention_cleanup,
 )
-from app.agents.memory_views import list_pending_l1_deltas
+from app.agents.memory.memory_views import list_pending_l1_deltas
 
 
 class TenantUserRequest(BaseModel):
@@ -169,7 +169,7 @@ def register_memory_routes(
     @router.get("/v1/memory/runtime")
     async def memory_runtime() -> dict:
         handle = await get_handle("system", "admin", "runtime")
-        from app.agents.memory_runtime_debug import collect_memory_runtime_status
+        from app.agents.memory.memory_runtime_debug import collect_memory_runtime_status
 
         return await collect_memory_runtime_status(
             handle.run_ctx, event="http_runtime"

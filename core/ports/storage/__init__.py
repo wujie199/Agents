@@ -3,6 +3,7 @@ from .vector import VectorPort, VectorRecord, SearchResult
 from .relational import RelationalPort, SessionArchive, MessageRecord
 from .graph import GraphPort, GraphNode, GraphEdge, GraphPath
 from .object_store import ObjectStorePort, ObjectMetadata
+from .checkpointer import CheckpointerPort
 
 __all__ = [
     "CachePort",
@@ -18,4 +19,5 @@ __all__ = [
     "GraphPath",
     "ObjectStorePort",
     "ObjectMetadata",
+    "CheckpointerPort",
 ]

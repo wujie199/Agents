@@ -12,7 +12,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.api.chat_server import create_app
-from app.agents.chat_turn import ChatTurnResult
+from app.agents.orchestration.chat_turn import ChatTurnResult
 
 
 @pytest.fixture

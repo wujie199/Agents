@@ -10,7 +10,7 @@ from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 from core.ports.memory import PromptMemorySnapshot
 
-from app.agents.enterprise_memory import (
+from app.agents.memory.enterprise_memory import (
     confirm_pending_l1,
     get_memory_status,
     list_user_sessions,

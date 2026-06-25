@@ -8,10 +8,10 @@ import pytest
 import yaml
 
 from agent_platform.memory.adapters.config_loader import load_memory_config
-from app.agents.chat_config import ChatAgentConfig
+from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import resolve_recall_scope
-from app.agents.name_remember import parse_name_from_intro
-from app.agents.retrieval_router import build_retrieval_plan, classify_intent
+from app.agents.memory.name_remember import parse_name_from_intro
+from app.agents.roles.retrieval_router import build_retrieval_plan, classify_intent
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "memory_scenarios.yml"

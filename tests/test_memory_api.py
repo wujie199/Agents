@@ -13,8 +13,8 @@ from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 
 from app.api.chat_server import create_app
-from app.agents.chat_config import load_chat_config
-from app.agents.chat_service import ChatSessionHandle
+from app.agents.orchestration.chat_config import load_chat_config
+from app.agents.orchestration.chat_service import ChatSessionHandle
 
 
 def _light_run_ctx() -> RunContext:
