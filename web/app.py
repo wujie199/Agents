@@ -119,7 +119,7 @@ def _format_rag_markdown(evidences: list[dict]) -> str:
     """将 evidences_summary 列表格式化为 Markdown 展示文本。"""
     if not evidences:
         return ""
-    lines = ["### 📚 RAG 检索结果\n"]
+    lines = ["#### 📚 RAG 知识库\n"]
     for i, ev in enumerate(evidences, 1):
         score = ev.get("score", 0)
         citation = ev.get("citation", "")
@@ -132,6 +132,55 @@ def _format_rag_markdown(evidences: list[dict]) -> str:
             lines.append(f"　> {preview}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _format_memory_markdown(memory_summary: dict) -> str:
+    """将记忆组件命中摘要格式化为 Markdown。"""
+    if not memory_summary:
+        return ""
+    recall_hit = memory_summary.get("recall_hit")
+    skill_hit = memory_summary.get("skill_hit")
+    l4_hit = memory_summary.get("l4_hit")
+    lines = ["#### 🧠 记忆组件\n"]
+    if recall_hit:
+        lines.append("- ✅ 会话回忆")
+        preview = memory_summary.get("recall_preview", "")
+        if preview:
+            lines.append(f"  > {preview[:200]}")
+    else:
+        lines.append("- ⬜ 会话回忆")
+    if skill_hit:
+        lines.append("- ✅ 技能检索")
+        preview = memory_summary.get("skill_preview", "")
+        if preview:
+            lines.append(f"  > {preview[:200]}")
+    else:
+        lines.append("- ⬜ 技能检索")
+    if l4_hit:
+        lines.append("- ✅ 用户画像")
+        preview = memory_summary.get("l4_preview", "")
+        if preview:
+            lines.append(f"  > {preview[:200]}")
+    else:
+        lines.append("- ⬜ 用户画像")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _format_retrieval_markdown(
+    evidences: list[dict], memory_summary: dict | None = None,
+) -> str:
+    """合并 RAG + 记忆组件的检索结果为统一 Markdown。"""
+    rag_md = _format_rag_markdown(evidences)
+    mem_md = _format_memory_markdown(memory_summary or {})
+    if not rag_md and not mem_md:
+        return ""
+    parts = ["### 🔍 检索结果\n"]
+    if rag_md:
+        parts.append(rag_md)
+    if mem_md:
+        parts.append(mem_md)
+    return "\n".join(parts)
 
 
 # ══════════════════════════════════════════════════════════
@@ -232,9 +281,13 @@ async def chat_stream(
     handle = await _get_or_create_session(tenant_id, user_id, session_id)
     t_session_ms = (time.perf_counter() - t_session_start) * 1000
 
+    # 会话就绪，通知前端
+    yield json.dumps({"type": "status", "text": "🔍 会话就绪，检索知识库..."}, ensure_ascii=False), ""
+
     accumulated = ""
     thinking_acc = ""
     evidences_summary: list[dict] = []
+    memory_summary: dict = {}
 
     # 计时标记
     t_stream_start = time.perf_counter()
@@ -247,18 +300,37 @@ async def chat_stream(
     thinking_chunks = 0
 
     try:
-        async for payload in stream_chat_turn_events(
+        _ev_gen = stream_chat_turn_events(
             handle,
             message,
             engine=ENGINE,
             enable_rag=enable_rag,
             stream_mode="auto",
-        ):
+        )
+        _LLM_EVENT_TIMEOUT = 120  # 秒，与 DashScope timeout 对齐
+
+        while True:
+            try:
+                payload = await asyncio.wait_for(
+                    _ev_gen.__anext__(), timeout=_LLM_EVENT_TIMEOUT
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                yield (
+                    accumulated + "\n\n⏱️ LLM 响应超时（>120s 无事件），请检查网络或重试",
+                    _format_retrieval_markdown(evidences_summary, memory_summary),
+                )
+                break
+
             event = json.loads(payload)
             etype = event.get("type")
             if etype == "meta":
                 t_first_meta = time.perf_counter()
                 evidences_summary = event.get("evidences_summary") or []
+                memory_summary = event.get("memory_summary") or {}
+                # RAG 检索完成，通知前端
+                yield json.dumps({"type": "status", "text": "📚 RAG 检索完成，正在推理..."}, ensure_ascii=False), ""
             elif etype == "thinking":
                 if t_first_thinking is None:
                     t_first_thinking = time.perf_counter()
@@ -269,8 +341,8 @@ async def chat_stream(
                     f"<details open><summary>💭 思考过程</summary>\n\n"
                     f"{thinking_acc}\n</details>\n\n"
                 )
-                yield thinking_html + accumulated, _format_rag_markdown(
-                    evidences_summary
+                yield thinking_html + accumulated, _format_retrieval_markdown(
+                    evidences_summary, memory_summary
                 )
             elif etype == "delta":
                 if t_first_delta is None:
@@ -283,11 +355,11 @@ async def chat_stream(
                         f"<details><summary>💭 思考过程（{len(thinking_acc)} 字）</summary>\n\n"
                         f"{thinking_acc}\n</details>\n\n"
                     )
-                    yield thinking_html + accumulated, _format_rag_markdown(
-                        evidences_summary
+                    yield thinking_html + accumulated, _format_retrieval_markdown(
+                        evidences_summary, memory_summary
                     )
                 else:
-                    yield accumulated, _format_rag_markdown(evidences_summary)
+                    yield accumulated, _format_retrieval_markdown(evidences_summary, memory_summary)
             elif etype == "done":
                 t_done = time.perf_counter()
                 # 确保最终文本完整
@@ -305,15 +377,24 @@ async def chat_stream(
                      f"{thinking_acc}\n</details>\n\n" if thinking_acc else "")
                     + accumulated
                 ):
-                    yield final_display, _format_rag_markdown(evidences_summary)
+                    yield final_display, _format_retrieval_markdown(evidences_summary, memory_summary)
     except Exception as exc:
         t_done = time.perf_counter()
-        yield accumulated + f"\n\n[错误] {exc}", _format_rag_markdown(evidences_summary)
+        yield accumulated + f"\n\n[错误] {exc}", _format_retrieval_markdown(evidences_summary, memory_summary)
 
     # ── 计算全链路 perf 指标 ──
     t_total_end = t_done or time.perf_counter()
     total_ms = (t_total_end - t_total_start) * 1000
     stream_total_ms = (t_total_end - t_stream_start) * 1000
+
+    # 读取后端精确实测子阶段耗时
+    _perf_stages: list[dict] = []
+    try:
+        _perf_stages = list(
+            (handle.run_ctx.extra or {}).get("last_turn_perf_stages") or []
+        )
+    except Exception:
+        pass
 
     # prepare 阶段（到 meta 事件）
     prepare_ms = None
@@ -359,8 +440,16 @@ async def chat_stream(
         "thinking_chunks": thinking_chunks,
         "content_chars": len(accumulated),
         "tokens_per_sec": tokens_per_sec,
+        "stages": [
+            {
+                "stage": s.get("stage"),
+                "duration_ms": s.get("duration_ms"),
+                **{k: v for k, v in s.items() if k not in ("stage", "duration_ms")}
+            }
+            for s in _perf_stages
+        ],
     }
-    yield json.dumps(perf_data, ensure_ascii=False), ""
+    yield json.dumps(perf_data, ensure_ascii=False), _format_retrieval_markdown(evidences_summary, memory_summary)
 
 
 # ══════════════════════════════════════════════════════════
@@ -534,6 +623,7 @@ def build_ui() -> gr.Blocks:
 
             with gr.Column(scale=3):
                 # ── 对话区 ──
+                load_older_btn = gr.Button("⬆️ 加载更早的对话", visible=False, variant="secondary")
                 chatbot = gr.Chatbot(
                     label="对话",
                     height=520,
@@ -547,9 +637,13 @@ def build_ui() -> gr.Blocks:
                 send_btn = gr.Button("发送", variant="primary")
                 rag_result = gr.Markdown(
                     value="",
-                    label="RAG 检索结果",
+                    label="检索结果",
                     visible=True,
                 )
+
+        # ── 状态：历史消息缓存 + 分页索引 ──
+        all_turns_cache = gr.State([])
+        visible_start_idx = gr.State(0)
 
         # ════════════════════════════════════════════════════════
         # 事件绑定
@@ -560,35 +654,47 @@ def build_ui() -> gr.Blocks:
             if not message.strip():
                 yield history, "", ""
                 return
-            # 追加用户消息
-            history = history + [{"role": "user", "content": message}]
-            # 流式追加 assistant 消息
-            partial_history = list(history)
-            partial_history.append({"role": "assistant", "content": "⏳ 思考中..."})
-            yield partial_history, "", ""
-            first_chunk = True
-            async for text, rag_md in chat_stream(message, history, tid, uid, sid, rag):
-                # 处理 perf 事件：渲染 waterfall 并追加到 assistant 消息
-                if text.startswith('{"type":"perf"') or text.startswith('{"type": "perf"'):
-                    try:
-                        perf_event = json.loads(text)
-                        perf_waterfall = _format_perf_waterfall(perf_event)
-                        # 将性能面板追加到当前 assistant 消息尾部
-                        current_content = partial_history[-1]["content"]
-                        # 移除之前的 perf 面板（如果有）
-                        marker = "\n\n---\n**⏱ 性能分析**"
-                        if marker in current_content:
-                            current_content = current_content[:current_content.index(marker)]
-                        partial_history[-1]["content"] = current_content + perf_waterfall
-                        yield partial_history, "", rag_md
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-                    continue
-                partial_history[-1]["content"] = text
-                # 首个真实内容到达时清除"思考中"占位
-                if first_chunk and text and "⏳" not in text:
-                    first_chunk = False
-                yield partial_history, "", rag_md
+            # 防重入：同一 session 不允许并发处理
+            handle = await _get_or_create_session(tid, uid, sid)
+            if handle.lock.locked():
+                yield history, "", ""
+                return
+            async with handle.lock:
+                # Gradio 6.x Chatbot 不会自动追加用户消息，需手动追加
+                history = history + [{"role": "user", "content": message}]
+                # 流式追加 assistant 消息
+                partial_history = list(history)
+                partial_history.append({"role": "assistant", "content": "⏳ 连接中..."})
+                yield partial_history, "", ""
+                first_chunk = True
+                async for text, rag_md in chat_stream(message, history, tid, uid, sid, rag):
+                    # 处理 status 事件：更新占位状态文本
+                    if text.startswith('{"type":"status"') or text.startswith('{"type": "status"'):
+                        try:
+                            status_event = json.loads(text)
+                            status_text = status_event.get("text", "")
+                            if status_text:
+                                partial_history[-1]["content"] = status_text
+                                yield partial_history, "", ""
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+                        continue
+                    # 处理 perf 事件：渲染 waterfall 并追加到检索结果（记忆组件之后）
+                    if text.startswith('{"type":"perf"') or text.startswith('{"type": "perf"'):
+                        try:
+                            perf_event = json.loads(text)
+                            perf_waterfall = _format_perf_waterfall(perf_event)
+                            # 将性能面板追加到 rag_result 尾部（记忆组件之后）
+                            combined_rag_md = rag_md + perf_waterfall if perf_waterfall else rag_md
+                            yield partial_history, "", combined_rag_md
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+                        continue
+                    partial_history[-1]["content"] = text
+                    # 首个真实内容到达时清除"思考中"占位
+                    if first_chunk and text and "⏳" not in text:
+                        first_chunk = False
+                    yield partial_history, "", rag_md
 
         send_btn.click(
             on_chat,
@@ -642,18 +748,77 @@ def build_ui() -> gr.Blocks:
             outputs=[docs_list],
         )
 
-        # ── 页面加载时预热默认会话，消除首次对话卡顿 ──
-        async def on_warmup(tid, uid, sid):
+        # ── 页面加载时预热会话 + 加载历史对话（初始仅最近 10 轮） ──
+        _INITIAL_TURN_LIMIT = 10  # 初始显示轮数
+
+        async def load_session_history(tid, uid, sid):
+            """页面加载 / 切换 session_id 时：预热会话并加载最近 N 轮历史消息。
+            
+            返回:
+              chatbot_history: 最近 N 轮消息（Gradio Chatbot 格式）
+              all_turns_cache: 全部历史消息缓存
+              visible_start_idx: 当前显示的起始索引（在缓存中的位置）
+              status_text: 状态文本
+              load_more_visible: "加载更多"按钮是否可见
+            """
             try:
-                await _get_or_create_session(tid, uid, sid)
-                return "会话已就绪（预热完成）"
+                handle = await _get_or_create_session(tid, uid, sid)
+                memory = handle.run_ctx.require_memory()
+                request = handle.run_ctx.request
+                # 读取该 session 的所有消息
+                rows = await memory.list_turns(request, limit=200)
+                # 转换为 Gradio Chatbot 格式
+                all_history = []
+                for row in rows:
+                    role = row.get("role")
+                    content = row.get("content", "")
+                    if role in ("user", "assistant") and content:
+                        all_history.append({"role": role, "content": content})
+                
+                total = len(all_history)
+                if total == 0:
+                    return [], [], 0, "会话已就绪（无历史消息）", False
+                
+                # 初始只显示最近 _INITIAL_TURN_LIMIT 轮
+                start_idx = max(0, total - _INITIAL_TURN_LIMIT)
+                visible_history = all_history[start_idx:]
+                has_more = start_idx > 0
+                status = f"已加载 {len(visible_history)} 条历史消息" + ("（还有更早的对话）" if has_more else "")
+                return visible_history, all_history, start_idx, status, has_more
             except Exception as exc:
-                return f"预热失败: {exc}"
+                return [], [], 0, f"加载失败: {exc}", False
+
+        async def load_older_turns(current_history, all_cache, start_idx):
+            """点击"加载更早对话"按钮时：从缓存中再取前 10 轮，prepend 到 Chatbot。"""
+            if not all_cache or start_idx <= 0:
+                return current_history, all_cache, start_idx, gr.update(visible=False)
+            
+            # 向前扩展 10 轮
+            new_start = max(0, start_idx - _INITIAL_TURN_LIMIT)
+            older_turns = all_cache[new_start:start_idx]
+            # prepend 到当前 history 前面
+            updated_history = older_turns + current_history
+            has_more = new_start > 0
+            return updated_history, all_cache, new_start, gr.update(visible=has_more)
 
         demo.load(
-            on_warmup,
+            load_session_history,
             inputs=[tenant_id, user_id, session_id],
-            outputs=[session_status],
+            outputs=[chatbot, all_turns_cache, visible_start_idx, session_status, load_older_btn],
+        )
+
+        # ── 切换 session_id 时自动加载该会话历史 ──
+        session_id.change(
+            load_session_history,
+            inputs=[tenant_id, user_id, session_id],
+            outputs=[chatbot, all_turns_cache, visible_start_idx, session_status, load_older_btn],
+        )
+
+        # ── 加载更早对话 ──
+        load_older_btn.click(
+            load_older_turns,
+            inputs=[chatbot, all_turns_cache, visible_start_idx],
+            outputs=[chatbot, all_turns_cache, visible_start_idx, load_older_btn],
         )
 
     return demo
