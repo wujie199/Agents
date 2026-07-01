@@ -1,0 +1,35 @@
+# RAG evaluation configuration (RAGAS judge + generation overrides)
+
+generation:
+  model_role: main_llm
+  memory_system: "你是知识问答助手。请基于检索片段准确、简洁地回答用户问题。"
+  max_evidence_chars: 6000
+  max_evidence_items: 8
+  rag_min_score: 0.0
+  rag_min_keep: 3
+  strict_grounding: true
+
+judge:
+  model_role: eval_judge_llm
+  embedding_role: embedding
+
+# Role overlay when eval_judge_llm is not defined in config/models.yml
+roles:
+  eval_judge_llm:
+    instance: dashscope_chat
+
+metrics:
+  full:
+    - context_precision
+    - context_recall
+    - faithfulness
+    - answer_relevancy
+    - answer_correctness
+    - context_relevancy
+  retrieval_only:
+    - context_precision
+    - context_recall
+
+output:
+  results_dir: data/rag_eval/results
+  preview_chars: 500

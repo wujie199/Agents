@@ -6,7 +6,7 @@ import pytest
 
 from core.domain.context import ACL, RequestContext
 from core.domain.evidence import SourceType
-from document.rag.adapters.retrieval.bm25_local import LocalBm25Index, tokenize
+from document.rag.components.storage.bm25_local import LocalBm25Index, tokenize
 from document.rag.application.retrieval.hybrid_pipeline import (
     dedupe_by_chunk_id,
     filter_by_rerank_min_score,

@@ -16,6 +16,7 @@ class BackendType(str, Enum):
     SQL = "sql"
     VECTOR = "vector"
     GRAPH = "graph"
+    BM25 = "bm25"
 
 
 class ExecutionOrder(str, Enum):
@@ -54,12 +55,14 @@ class RoutingRules:
         self,
         enable_graph: bool = False,
         enable_sql: bool = False,
+        enable_bm25: bool = False,
         *,
         default_top_k: int = 10,
         default_rerank_n: int = 5,
     ):
         self._enable_graph = enable_graph
         self._enable_sql = enable_sql
+        self._enable_bm25 = enable_bm25
         self._default_top_k = default_top_k
         self._default_rerank_n = default_rerank_n
 
@@ -69,6 +72,8 @@ class RoutingRules:
             backends.append(BackendType.SQL)
         if self._enable_graph:
             backends.append(BackendType.GRAPH)
+        if self._enable_bm25:
+            backends.append(BackendType.BM25)
         return backends
 
     def route(
@@ -119,6 +124,8 @@ class RoutingRules:
                 secondary.append(BackendType.SQL)
             if self._enable_graph:
                 secondary.append(BackendType.GRAPH)
+            if self._enable_bm25:
+                secondary.append(BackendType.BM25)
             return RetrievalPlan(
                 primary=BackendType.VECTOR,
                 secondary=secondary,
@@ -129,6 +136,8 @@ class RoutingRules:
 
         # SEMANTIC_DOC / OPERATIONAL / default
         secondary = [BackendType.SQL] if self._enable_sql else []
+        if self._enable_bm25:
+            secondary.append(BackendType.BM25)
         return RetrievalPlan(
             primary=BackendType.VECTOR,
             secondary=secondary,

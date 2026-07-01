@@ -502,6 +502,16 @@ def _turn_buffer_info(ctx: RunContext) -> dict[str, Any]:
     }
 
 
+def _embedding_backend_label(ctx: RunContext, cfg: dict[str, Any]) -> str:
+    models = getattr(ctx, "models", None)
+    if models is not None:
+        try:
+            return models.get_embedding_version_key("embedding")
+        except Exception:
+            pass
+    return str(cfg.get("embedding_role", "embedding"))
+
+
 def _checkpointer_info(ctx: RunContext) -> dict[str, Any]:
     cp = ctx.checkpointer
     out: dict[str, Any] = {"relational": None, "langgraph": None}
@@ -690,7 +700,7 @@ async def collect_memory_runtime_status(
         "checkpointer": _checkpointer_info(ctx),
         "cold_archive": bool(cfg.get("enable_cold_archive")),
         "session_vector_index": bool(cfg.get("enable_session_vector_index")),
-        "embedding_backend": cfg.get("session_embedding_backend"),
+        "embedding_backend": _embedding_backend_label(ctx, cfg),
         "object_store": type(extra.get("object_store")).__name__
         if extra.get("object_store")
         else None,

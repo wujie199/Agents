@@ -24,8 +24,6 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "session_vector_dir": "data/session_vectors",
     "session_vector_collection": "session_messages",
     "session_hybrid_search": True,
-    "session_embedding_backend": "mock",
-    "session_embedding_dim": 64,
     "session_vector_embed_batch_size": 32,
     "session_vector_auto_reindex_on_version_change": True,
     "archive_backend": "sqlite",

@@ -8,18 +8,19 @@ _log = logging.getLogger("document.rag.bootstrap.offline")
 
 from core.ports.index import IndexProfile
 from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
-from document.rag.adapters.registry import build_embedding, build_bm25_index
+from document.rag.components.storage.registry import build_bm25_index
 from document.rag.application.indexing.service import IndexService
-from document.rag.application.ingest.factory import build_ingest_pipeline
+from document.rag.application.ingest_factory import build_ingest_pipeline
+from document.rag.bootstrap.model_bridge import apply_models_to_rag_config
+from document.rag.bootstrap.online import resolve_embedding_model
 
 
 def resolve_offline_embedding(
-    cfg: Optional[RagPipelineConfig] = None,
-    *,
-    config_dir: str = "config",
+    cfg: RagPipelineConfig,
+    models: Any = None,
 ) -> Any:
-    """离线建库 embedding（见 config/rag_pipeline.yml embedding.backend）。"""
-    return build_embedding(cfg, config_dir=config_dir)
+    """离线建库 embedding（见 config/models.yml roles.embedding）。"""
+    return resolve_embedding_model(models, cfg)
 
 
 def create_offline_index_service(
@@ -29,6 +30,7 @@ def create_offline_index_service(
     config_dir: str = "config",
     index_profile: IndexProfile = IndexProfile.VECTOR_ONLY,
     enable_bm25: bool = True,
+    models: Any = None,
 ) -> Tuple[IndexService, str]:
     """
     创建 IndexService 与 Chroma 持久化路径。
@@ -40,7 +42,7 @@ def create_offline_index_service(
 
     chroma_dir = str(data_dir / "chroma_dev")
     vector_port = ChromaVectorAdapter(persist_directory=chroma_dir)
-    embedding = resolve_offline_embedding(cfg, config_dir=config_dir)
+    embedding = resolve_offline_embedding(cfg, models=models)
 
     sql_port = None
     graph_port = None
@@ -77,8 +79,22 @@ def create_offline_index_service(
     return index_service, chroma_dir
 
 
-def load_offline_config(config_dir: str) -> RagPipelineConfig:
-    return load_rag_pipeline_config(config_dir=config_dir)
+def load_offline_config(
+    config_dir: str,
+    models: Any = None,
+    *,
+    config_path: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> RagPipelineConfig:
+    from document.rag.config.pipeline import resolve_rag_pipeline_config_path
+
+    resolved = config_path or resolve_rag_pipeline_config_path(
+        config_dir=config_dir,
+        profile=profile,
+    )
+    cfg = load_rag_pipeline_config(config_path=resolved, config_dir=config_dir)
+    cfg, _ = apply_models_to_rag_config(cfg, models, config_dir=config_dir)
+    return cfg
 
 
 def build_offline_ingest_port(cfg: RagPipelineConfig):

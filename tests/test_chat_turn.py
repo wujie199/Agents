@@ -99,6 +99,7 @@ async def test_run_chat_turn_memory_and_rag():
         memory=memory,
         rag=rag,
         models=FakeModelPort({"main_llm": mock_llm}),
+        extra={"rag_tenant_id": "t1"},
     )
 
     cfg = ChatAgentConfig(

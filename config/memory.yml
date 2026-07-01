@@ -24,13 +24,11 @@ checkpoint_retention_days: 90
 memory_summarizer_role: memory_summarizer_llm
 use_llm_compress: true
 use_llm_summarize: true
-# L2 混合检索（mock 向量，无需外置 embedding 模型）
+# L2 混合检索（embedding 与 RAG 共用 config/models.yml roles.embedding）
 enable_session_vector_index: true
 session_vector_dir: data/session_vectors
 session_vector_collection: session_messages
 session_hybrid_search: true
-session_embedding_backend: mock
-session_embedding_dim: 64
 # PostgreSQL 生产（见 config/memory.production.example.yml、document/memory/PG_PRODUCTION.md）
 archive_backend: sqlite
 archive_sqlite_path: data/session_archive.db

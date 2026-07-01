@@ -4,7 +4,7 @@
 rules:
   - name: contract
     tags: [合同, 法律]
-    keywords: [甲方, 乙方, 违约责任, 合同编号]
+    keywords: [甲方, 乙方, 违约责任, 合同编号, 合同, 协议, 签署]
     match: any
 
   - name: rental

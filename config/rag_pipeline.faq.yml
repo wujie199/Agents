@@ -1,0 +1,89 @@
+# FAQ PDF 建库 profile — chunk_strategy: faq，OCR 后处理，标准清洗，无 legal cleaner
+# 用法: python document/build_rag_index.py --profile faq data/test_docs/*.pdf
+
+collection_name: agent
+
+enable_vector_index: true
+enable_graph_index: false
+
+chunk_size: 800
+chunk_overlap: 0
+chunk_strategy: faq
+default_top_k: 10
+rerank_top_n: 5
+enable_cache: true
+cache_ttl_seconds: 900
+model_version: bge-small-zh-v1.5-local
+embedding_batch_size: 32
+
+enable_chunk_dedupe: true
+enable_semantic_dedupe: false
+semantic_dedupe_threshold: 0.85
+
+storage:
+  chroma:
+    persist_directory: chroma_db
+    hnsw_space: cosine
+    hybrid_search: false
+
+metadata:
+  enabled: true
+  backend: rule_keyword
+  rules_path: null
+  max_tags: 32
+  tag_filename: true
+
+ingest:
+  mode: ocr_only
+  routing: simplified
+  plain_text_formats: [txt, md]
+  ocr_backend: auto
+  language: ch
+  word_to_pdf: true
+  pdf_dpi: 200
+  ocr_use_layout: true
+  enable_cleaning: true
+  ocr_postprocess: true
+  cleaning_level: standard
+  ocr_fast: true
+  ocr_table_e2e: false
+  enable_header_footer_dedup: true
+  header_footer_threshold: 0.3
+
+cleaners:
+  default:
+    name: faq_default
+    cleaners:
+      - type: unicode_normalizer
+      - type: special_char
+        preserve_chinese: true
+        preserve_punctuation: true
+      - type: whitespace
+      - type: noise
+      - type: duplicate
+      - type: length_filter
+        min_length: 5
+        min_meaningful_chars: 3
+
+retrieval:
+  primary_backend: vector
+  enable_hybrid: true
+  enable_vector_search: true
+  enable_bm25_search: true
+  vector_top_k: 10
+  bm25_top_k: 10
+  hybrid_weights: [0.5, 0.5]
+  fusion_strategy: weighted
+  fusion_top_n: 10
+  enable_rerank: true
+  rerank_top_n: 5
+  rerank_min_score: 0.4
+  use_mock_rerank_fallback: true
+  enable_router: false
+  auto_route: false
+  enable_graph: false
+  enable_sql: false
+
+rewrite:
+  enable_hyde: false
+  enable_multi_query: false

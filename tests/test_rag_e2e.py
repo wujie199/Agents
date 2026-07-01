@@ -4,11 +4,11 @@ from pathlib import Path
 
 from core.domain.context import RequestContext
 from core.domain.evidence import SourceType
-from document.rag.pipeline.ingest.factory import build_ingest_pipeline
-from document.rag.pipeline.index.mock_embedding import MockEmbeddingModel
+from document.rag.application.ingest_factory import build_ingest_pipeline
+from document.rag.components.embedding.mock import MockEmbeddingModel
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
-from document.rag.bridges.rag_port_adapter import RAGPortAdapter
-from document.rag.pipeline.index.service import IndexService
+from document.rag.facades.rag import RAGPortAdapter
+from document.rag.application.indexing.service import IndexService
 from document.rag.config import RagPipelineConfig
 from agent_platform.storage.adapters.memory.async_cache_adapter import AsyncMemoryCacheAdapter
 

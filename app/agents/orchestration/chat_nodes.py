@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import time as _time_mod
 from dataclasses import replace
 from typing import Any, List, Optional
 
@@ -40,12 +38,8 @@ from app.agents.prompts.prompt_builder import (
     build_chat_messages,
     filter_evidence_bundle,
     format_evidence_bundle,
+    format_rag_miss_notice,
 )
-
-# ── RAG 查询结果缓存（相同 query+tenant 短期复用） ──
-_RAG_CACHE: dict[str, tuple[float, Any]] = {}
-_RAG_CACHE_TTL = 300.0   # 5 分钟
-_RAG_CACHE_MAX = 64
 
 
 async def fetch_turn_history(
@@ -126,36 +120,17 @@ async def retrieve_rag_bundle(
         },
     )
 
-    # ── RAG 缓存查找 ──
-    _cache_key = hashlib.md5(
-        f"{query}|{rag_request.tenant_id}".encode()
-    ).hexdigest()
-    _now = _time_mod.time()
-    _cached = _RAG_CACHE.get(_cache_key)
-    if _cached and (_now - _cached[0]) < _RAG_CACHE_TTL:
-        bundle = _cached[1]
-        agent_debug(
-            "RAG-C",
-            "chat_nodes.retrieve_rag_bundle:cache_hit",
-            "RAG 缓存命中",
-            {"cache_key": _cache_key[:12], "age_s": round(_now - _cached[0], 1)},
-        )
-    else:
-        import time as _time
+    # RAG 缓存由 RAGPort（Redis）统一处理
+    import time as _time
 
-        _rag_t0 = _time.perf_counter()
-        bundle = await ctx.rag.route_and_retrieve(query, rag_request, plan=plan)
-        perf_mark(
-            ctx,
-            "RAG.route_and_retrieve",
-            (_time.perf_counter() - _rag_t0) * 1000,
-            evidence_count=len(bundle.evidences or []),
-        )
-        # 写入缓存（LRU 淘汰）
-        if len(_RAG_CACHE) >= _RAG_CACHE_MAX:
-            _oldest_key = min(_RAG_CACHE, key=lambda k: _RAG_CACHE[k][0])
-            _RAG_CACHE.pop(_oldest_key, None)
-        _RAG_CACHE[_cache_key] = (_now, bundle)
+    _rag_t0 = _time.perf_counter()
+    bundle = await ctx.rag.route_and_retrieve(query, rag_request, plan=plan)
+    perf_mark(
+        ctx,
+        "RAG.route_and_retrieve",
+        (_time.perf_counter() - _rag_t0) * 1000,
+        evidence_count=len(bundle.evidences or []),
+    )
     agent_debug(
         "RAG-D",
         "chat_nodes.retrieve_rag_bundle:result",
@@ -190,8 +165,8 @@ async def build_turn_messages(
     *,
     enable_rag: bool,
     rag_plan: Optional[dict] = None,
-) -> tuple[list[dict[str, str]], int, bool, str, list[dict]]:
-    """返回 (llm_messages, evidence_count, rag_empty, memory_snapshot_hash, evidences_summary)。"""
+) -> tuple[list[dict[str, str]], int, bool, str, list[dict], dict]:
+    """返回 (llm_messages, evidence_count, rag_empty, memory_snapshot_hash, evidences_summary, memory_summary)。"""
     clear_layer_triggers(ctx)
     memory = ctx.require_memory()
     await perf_await(ctx, "L2.ensure_session", memory.ensure_session(ctx.request))
@@ -437,7 +412,7 @@ async def build_turn_messages(
                 "intent": retrieval_plan.intent,
             },
         )
-    else:
+    elif not enable_rag:
         trace_layer_trigger(ctx, "RAG", "retrieve", False, "enable_rag=false")
         agent_debug(
             "RAG-SKIP",
@@ -445,6 +420,8 @@ async def build_turn_messages(
             "RAG 已关闭 (--no-rag)",
             {"enable_rag": False},
         )
+
+    rag_attempted = bool(run_rag)
 
     agent_debug(
         "RAG-D",
@@ -484,6 +461,22 @@ async def build_turn_messages(
                     "fused_chars": len(fused.evidence_text),
                 },
             )
+
+    rag_miss = rag_attempted and not (evidence_text or "").strip()
+    if (
+        rag_miss
+        and cfg.refuse_hallucination_on_rag_miss
+        and retrieval_plan.intent in ("knowledge", "recall_and_knowledge")
+    ):
+        evidence_text = format_rag_miss_notice(bundle, strict=True)
+        trace_layer_trigger(
+            ctx,
+            "RAG",
+            "retrieve",
+            True,
+            "miss_no_hallucination",
+            data={"intent": retrieval_plan.intent},
+        )
 
     tool_hints = ""
     if (
@@ -614,7 +607,25 @@ async def build_turn_messages(
         }
         for ev in (bundle.evidences or [])[:10]
     ] if bundle and bundle.evidences else []
-    return messages, ev_count, bundle.empty if bundle else True, snap.hash, evidences_summary
+    # ── 记忆命中摘要（供前端展示） ──
+    _skill_markers = ("【可用技能】", "【技能检索】")
+    _l4_markers = ("【外部画像 L4】", "【用户画像】")
+    memory_summary = {
+        "recall_hit": session_ctx.recall_prefetch_hit,
+        "recall_preview": (session_ctx.recall_prefetch or "")[:200],
+        "skill_hit": any(m in (session_context or "") for m in _skill_markers),
+        "skill_preview": "",
+        "l4_hit": any(m in (session_context or "") for m in _l4_markers),
+        "l4_preview": "",
+    }
+    return (
+        messages,
+        ev_count,
+        rag_miss if rag_attempted else (bundle.empty if bundle else True),
+        snap.hash,
+        evidences_summary,
+        memory_summary,
+    )
 
 
 async def persist_user_and_assistant(
@@ -628,6 +639,11 @@ async def persist_user_and_assistant(
 ) -> None:
     if not persist:
         return
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict):
+        turn_id = extra.get("_active_turn_id")
+        if turn_id and extra.get("_turn_persisted_id") == turn_id:
+            return
     memory = ctx.require_memory()
     trace = ctx.request.trace_id
     buf = turn_buffer if turn_buffer is not None else ctx.turn_buffer
@@ -677,3 +693,7 @@ async def persist_user_and_assistant(
             ],
         },
     )
+    if isinstance(getattr(ctx, "extra", None), dict):
+        turn_id = ctx.extra.get("_active_turn_id")
+        if turn_id:
+            ctx.extra["_turn_persisted_id"] = turn_id

@@ -72,6 +72,10 @@ class IndexManifest:
     def is_indexed(self, tenant_id: str, file_md5: str) -> bool:
         return self.get_entry(tenant_id, file_md5) is not None
 
+    def has_tenant(self, tenant_id: str) -> bool:
+        """租户是否已有至少一条索引记录。"""
+        return bool(self._data.get("tenants", {}).get(tenant_id))
+
     def matches_index_config(
         self,
         tenant_id: str,

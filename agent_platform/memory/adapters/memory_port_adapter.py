@@ -179,6 +179,9 @@ class MemoryPortAdapter:
             stored,
             expected,
         )
+        reset = getattr(self._vector_index, "reset_collection", None)
+        if callable(reset):
+            reset()
         await self.reindex_session_vectors(batch_size=self._reindex_batch_size)
 
     def compose_prompt_snapshot(
@@ -381,6 +384,30 @@ class MemoryPortAdapter:
             limit=limit,
             offset=offset or None,
         )
+
+    async def list_recent_turns(
+        self, context: RequestContext, limit: int = 200
+    ) -> List[dict]:
+        """按时间倒序取最近 limit 条，返回结果仍为 ASC（便于展示）。"""
+        if self._archive_db is None:
+            return []
+        rows = await self._archive_db.select_many(
+            "messages",
+            [
+                "message_id",
+                "session_id",
+                "role",
+                "content",
+                "ts",
+                "token_count",
+                "metadata_json",
+            ],
+            where={"session_id": context.session_id},
+            order_by="ts DESC",
+            limit=limit,
+        )
+        rows.reverse()
+        return rows
 
     async def list_sessions(
         self, tenant_id: str, user_id: str, limit: int = 20
@@ -893,6 +920,38 @@ class MemoryPortAdapter:
             self._logger.error("Session search failed: %s", e)
             return f"Search error: {e}"
 
+    async def _count_indexable_messages(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> int:
+        lister = getattr(self._archive_db, "list_messages_for_reindex", None)
+        if lister is None or self._archive_db is None:
+            return 0
+        total = 0
+        offset = 0
+        batch_size = 500
+        while True:
+            batch = await lister(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                limit=batch_size,
+                offset=offset,
+            )
+            if not batch:
+                break
+            for row in batch:
+                content = (row.get("content") or "").strip()
+                if content and content != "[redacted]" and not row.get("redacted"):
+                    total += 1
+            offset += len(batch)
+            if len(batch) < batch_size:
+                break
+        return total
+
     async def reindex_session_vectors(
         self,
         *,
@@ -915,6 +974,29 @@ class MemoryPortAdapter:
                 "batches": 0,
                 "reason": "session_vector_index_not_configured",
             }
+
+        if session_id and getattr(self._vector_index, "is_version_current", lambda: False)():
+            archive_count = await self._count_indexable_messages(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            vector_count = getattr(
+                self._vector_index, "count_session_vectors", lambda _s: 0
+            )(session_id)
+            if archive_count > 0 and vector_count >= archive_count:
+                return {
+                    "indexed": 0,
+                    "errors": 0,
+                    "batches": 0,
+                    "skipped": True,
+                    "reason": "already_indexed",
+                    "archive_count": archive_count,
+                    "vector_count": vector_count,
+                    "index_version": getattr(
+                        self._vector_index, "index_version", None
+                    ),
+                }
 
         lister = getattr(self._archive_db, "list_messages_for_reindex", None)
         if lister is None:
@@ -942,17 +1024,25 @@ class MemoryPortAdapter:
                 break
 
             batches += 1
-            for row in batch:
+            batch_indexer = getattr(self._vector_index, "index_messages", None)
+            if callable(batch_indexer):
                 try:
-                    await self._vector_index.index_message(row)
-                    indexed += 1
+                    indexed += await batch_indexer(batch)
                 except Exception as e:
-                    errors += 1
-                    self._logger.warning(
-                        "Reindex failed message_id=%s: %s",
-                        row.get("message_id"),
-                        e,
-                    )
+                    errors += len(batch)
+                    self._logger.warning("Batch reindex failed: %s", e)
+            else:
+                for row in batch:
+                    try:
+                        await self._vector_index.index_message(row)
+                        indexed += 1
+                    except Exception as e:
+                        errors += 1
+                        self._logger.warning(
+                            "Reindex failed message_id=%s: %s",
+                            row.get("message_id"),
+                            e,
+                        )
 
             offset += len(batch)
             if len(batch) < batch_size:

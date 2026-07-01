@@ -1,4 +1,4 @@
-# RAG 管道统一配置
+# RAG 管道配置（行为参数；模型路径见 config/models.yml）
 
 collection_name: agent
 
@@ -15,20 +15,19 @@ cache_ttl_seconds: 900
 model_version: bge-small-zh-v1.5-local
 embedding_batch_size: 32
 
-# 适配器 backend 见 document/rag/adapters/registry.py
-embedding:
-  backend: local_bge
-  # 外置盘未挂载时会提示挂载 /Volumes/wj，不会自动下载
-  model_path: /Volumes/wj/model/embedding/bge-small-zh-v1.5
-  device: null
-  normalize: true
+# Chroma 存储（原 config/chroma.yml 已合并）
+storage:
+  chroma:
+    persist_directory: chroma_db
+    hnsw_space: cosine
+    hnsw_construction_ef: 200
+    hnsw_search_ef: 100
+    hnsw_M: 16
+    k: 10
+    hybrid_search: false
+    bm25_k: 10
+    hybrid_weights: [0.5, 0.5]
 
-rerank:
-  backend: local_bge
-  model_path: /Volumes/wj/model/rerank/bge-reranker-base
-  device: null
-
-# 规则/关键词元数据打标（离线建库 step4，规则文件 config/metadata_tagging.yml）
 metadata:
   enabled: true
   backend: rule_keyword
@@ -49,8 +48,6 @@ ingest:
   enable_cleaning: true
   ocr_postprocess: true
   cleaning_level: standard
-  # 本地 Paddle OCR 模型（外置盘 /Volumes/wj；未挂载时会提醒，不会自动下载）
-  ocr_model_root: /Volumes/wj/model/ocr
   ocr_device: cpu
   ocr_preprocess: auto
   ocr_enable_formula: true
@@ -72,8 +69,8 @@ retrieval:
   fusion_top_n: 10
   enable_rerank: true
   rerank_top_n: 5
-  rerank_min_score: 0.8
-  use_mock_rerank_fallback: true   # 生产见 rag_pipeline.production.example.yml（false）
+  rerank_min_score: 0.4
+  use_mock_rerank_fallback: true
   enable_router: true
   auto_route: false
   enable_graph: false

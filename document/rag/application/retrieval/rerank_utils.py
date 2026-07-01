@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -21,7 +22,9 @@ async def apply_rerank(
         if not hasattr(rerank_model, "rerank"):
             return evidences[:top_n]
 
-        raw = rerank_model.rerank(query, documents, top_n=top_n)
+        raw = await asyncio.to_thread(
+            rerank_model.rerank, query, documents, top_n=top_n
+        )
         if not raw:
             return evidences[:top_n]
 
@@ -48,6 +51,6 @@ async def apply_rerank(
                 )
             )
         return reranked[:top_n] if reranked else evidences[:top_n]
-    except Exception as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         log.warning("Rerank failed: %s", exc)
         return evidences[:top_n]

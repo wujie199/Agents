@@ -28,8 +28,10 @@ from app.agents.roles.react_turn import (
     last_ai_text,
     make_react_agent,
 )
+from app.runtime.adapters.langgraph.model_bridge import filter_messages_for_llm
 from app.agents.middleware.compose import wrap_node, compose_middlewares
 from app.agents.middleware.tracing import TracingMiddleware
+from app.agents.middleware.timing import TimingMiddleware
 from app.agents.middleware.logging import LoggingMiddleware
 from app.agents.middleware.policy import PolicyMiddleware
 from app.agents.middleware.privacy import PrivacyMiddleware
@@ -44,6 +46,7 @@ class ChatGraphState(TypedDict):
     rag_empty: bool
     memory_snapshot_hash: str
     evidences_summary: list
+    memory_summary: dict
 
 
 async def _prepare_node(
@@ -61,7 +64,7 @@ async def _prepare_node(
                 user_input = str(msg.content or "").strip()
                 break
 
-    dict_messages, ev_count, rag_empty, mem_hash, evidences_summary = await build_turn_messages(
+    dict_messages, ev_count, rag_empty, mem_hash, evidences_summary, memory_summary = await build_turn_messages(
         ctx,
         user_input,
         chat_cfg,
@@ -101,6 +104,7 @@ async def _prepare_node(
         "rag_empty": rag_empty,
         "memory_snapshot_hash": mem_hash,
         "evidences_summary": evidences_summary or [],
+        "memory_summary": memory_summary or {},
     }
 
 
@@ -174,6 +178,7 @@ def build_chat_langgraph_workflow(
     # ── 构建 Middleware 链 ──
     middlewares = compose_middlewares(
         TracingMiddleware(),
+        TimingMiddleware(slow_threshold_ms=3000),
         PolicyMiddleware(),
         LoggingMiddleware(),
         PrivacyMiddleware(),
@@ -187,7 +192,7 @@ def build_chat_langgraph_workflow(
 
         _agent_cfg = (config or {}).get("configurable") or {}
         _agent_ctx = _agent_cfg.get("run_ctx")
-        _agent_messages = state.get("messages") or []
+        _agent_messages = filter_messages_for_llm(state.get("messages") or [])
         intent = ""
         if _agent_ctx is not None and isinstance(
             getattr(_agent_ctx, "extra", None), dict
@@ -205,11 +210,16 @@ def build_chat_langgraph_workflow(
 
                 out_messages = [*out_messages, AIMessage(content=assistant_text)]
         else:
-            result = await react_agent.ainvoke(
+            # 使用 astream 以触发 on_chat_model_stream 事件，
+            # 使 reasoning_content 能通过流式事件传递到前端
+            out_messages = list(_agent_messages)
+            async for _step in react_agent.astream(
                 {"messages": _agent_messages},
                 config,
-            )
-            out_messages = result.get("messages") or []
+            ):
+                _step_msgs = _step.get("messages") or []
+                if _step_msgs:
+                    out_messages = _step_msgs
             assistant_text = strip_model_reasoning(last_ai_text(out_messages))
         perf_mark(
             _agent_ctx,

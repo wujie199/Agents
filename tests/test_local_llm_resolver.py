@@ -49,6 +49,9 @@ def test_registry_cloud_when_no_local(tmp_path, monkeypatch):
 
     reg = ModelRegistry(config_path="config/models.yml")
     role = reg._roles["main_llm"]
-    assert role.profile == "dashscope_main"
-    assert role.fallback_chain == []
-    assert reg._profiles["dashscope_main"].model_name == "qwen3.6-plus"
+    assert role.profile == "dashscope_chat"
+    assert role.fallback_chain == ["ollama_chat", "local_hf_chat"]
+    router = reg._roles["router_llm"]
+    assert router.profile == "dashscope_chat"
+    assert router.fallback_chain == []
+    assert reg._profiles["dashscope_chat"].model_name == "qwen3.6-plus"

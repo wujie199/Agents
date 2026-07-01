@@ -11,6 +11,10 @@ from core.domain.evidence import (
     EvidenceBundle,
     SourceType,
 )
+from core.ports.rag import RerankPort, QueryRewritePort
+from core.ports.rag.embedding import EmbeddingPort
+from core.ports.storage.cache import CachePort
+from core.ports.storage.vector import VectorPort
 from document.rag.application.retrieval.router.classifier import QueryClassifier, ClassificationResult
 from document.rag.application.retrieval.router.rules import RoutingRules, RetrievalPlan, BackendType
 from document.rag.application.retrieval.router.fusion import FusionFactory
@@ -36,18 +40,20 @@ class RetrievalRouter:
         self,
         classifier: Optional[QueryClassifier] = None,
         rules: Optional[RoutingRules] = None,
-        cache_port: Optional[Any] = None,
-        vector_port: Optional[Any] = None,
+        cache_port: Optional[CachePort] = None,
+        vector_port: Optional[VectorPort] = None,
         sql_port: Optional[Any] = None,
         graph_port: Optional[Any] = None,
-        embedding_model: Optional[Any] = None,
-        rerank_model: Optional[Any] = None,
-        query_rewriter: Optional[Any] = None,
+        embedding_model: Optional[EmbeddingPort] = None,
+        rerank_model: Optional[RerankPort] = None,
+        query_rewriter: Optional[QueryRewritePort] = None,
+        bm25_index: Optional[Any] = None,
         collection_name: str = "agent",
         enable_cache: bool = True,
         cache_ttl: int = 900,
         enable_graph: bool = False,
         enable_sql: bool = False,
+        enable_bm25: bool = False,
         enable_rerank: bool = True,
         default_top_k: int = 10,
         default_rerank_n: int = 5,
@@ -56,6 +62,7 @@ class RetrievalRouter:
         self._rules = rules or RoutingRules(
             enable_graph=enable_graph,
             enable_sql=enable_sql,
+            enable_bm25=enable_bm25,
         )
         self._collection = collection_name
         self._cache_port = cache_port
@@ -65,6 +72,7 @@ class RetrievalRouter:
         self._embedding_model = embedding_model
         self._rerank_model = rerank_model if enable_rerank else None
         self._query_rewriter = query_rewriter
+        self._bm25_index = bm25_index
         self._doc_store = RagDocumentStore(sql_port) if sql_port and enable_sql else None
         self._enable_cache = enable_cache
         self._cache_ttl = cache_ttl
@@ -80,9 +88,10 @@ class RetrievalRouter:
     ) -> EvidenceBundle:
         classification = self._classifier.classify(query)
         
-        self._logger.info(
-            f"Query classified as {classification.query_type.value} "
-            f"with confidence {classification.confidence:.2f}"
+        self._logger.debug(
+            "Query classified as %s with confidence %.2f",
+            classification.query_type.value,
+            classification.confidence,
         )
         
         if plan_override:
@@ -98,7 +107,7 @@ class RetrievalRouter:
         else:
             plan = self._rules.route(classification, {"tenant_id": context.tenant_id})
         
-        self._logger.info(f"Retrieval plan: {plan.to_dict()}")
+        self._logger.debug("Retrieval plan: %s", plan.to_dict())
         
         queries = await self._rewrite_queries(query)
 
@@ -106,7 +115,7 @@ class RetrievalRouter:
             cache_key = self._get_cache_key(queries, context.tenant_id)
             cached = await self._get_from_cache(cache_key)
             if cached is not None and not cached.empty:
-                self._logger.info("Cache hit, returning cached results")
+                self._logger.debug("Cache hit, returning cached results")
                 return cached
 
         results = await self._execute_plan_multi(queries, plan, context, classification)
@@ -155,7 +164,7 @@ class RetrievalRouter:
             rewritten = await self._query_rewriter.rewrite(query)
             unique = list(dict.fromkeys(q.strip() for q in rewritten if q and q.strip()))
             return unique or [query]
-        except Exception as exc:
+        except (RuntimeError, ValueError) as exc:
             self._logger.warning("Query rewrite failed: %s", exc)
             return [query]
 
@@ -223,7 +232,7 @@ class RetrievalRouter:
                         query, backend, plan, context, classification
                     )
                     results.append(result)
-                except Exception as e:
+                except (RuntimeError, ConnectionError, TimeoutError, OSError, ValueError) as e:
                     self._logger.error(f"Backend {backend.value} failed: {e}")
                     results.append([])
             
@@ -249,6 +258,9 @@ class RetrievalRouter:
         elif backend == BackendType.GRAPH:
             return await self._retrieve_from_graph(query, plan, classification, context)
         
+        elif backend == BackendType.BM25:
+            return await self._retrieve_from_bm25(query, plan, context)
+        
         else:
             self._logger.warning(f"Unknown backend: {backend.value}")
             return []
@@ -273,8 +285,30 @@ class RetrievalRouter:
                 context.acl,
             )
             return hits
-        except Exception as e:
+        except (RuntimeError, ConnectionError, TimeoutError, OSError, ValueError) as e:
             self._logger.error("Vector retrieval failed: %s", e)
+            return []
+
+    async def _retrieve_from_bm25(
+        self,
+        query: str,
+        plan: RetrievalPlan,
+        context: RequestContext,
+    ) -> List[Evidence]:
+        if self._bm25_index is None:
+            return []
+        try:
+            from document.rag.application.retrieval.hybrid_pipeline import bm25_search
+            from document.rag.application.retrieval.helpers import filter_evidences_by_acl
+            hits = bm25_search(
+                self._bm25_index,
+                query,
+                plan.top_k,
+                context.tenant_id,
+            )
+            return filter_evidences_by_acl(hits, context.acl)
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
+            self._logger.error("BM25 retrieval failed: %s", e)
             return []
     
     async def _retrieve_from_sql(
@@ -342,7 +376,7 @@ class RetrievalRouter:
 
             return results
 
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError, ConnectionError) as e:
             self._logger.error("SQL retrieval failed: %s", e)
             return []
     
@@ -397,7 +431,7 @@ class RetrievalRouter:
             
             return results
             
-        except Exception as e:
+        except (RuntimeError, AttributeError, ConnectionError, OSError) as e:
             self._logger.error(f"Graph retrieval failed: {e}")
             return []
     
@@ -418,7 +452,7 @@ class RetrievalRouter:
             
             return []
             
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             self._logger.warning(f"Cache retrieval failed: {e}")
             return []
     
@@ -476,7 +510,7 @@ class RetrievalRouter:
             cached = await cache_get(self._cache_port, key)
             if cached:
                 return bundle_from_cache_dict(cached)
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
             self._logger.warning("Cache get failed: %s", e)
 
         return None
@@ -492,5 +526,5 @@ class RetrievalRouter:
                 bundle_to_cache_dict(bundle),
                 self._cache_ttl,
             )
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
             self._logger.warning("Cache set failed: %s", e)

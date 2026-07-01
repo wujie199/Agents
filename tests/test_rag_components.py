@@ -1,11 +1,11 @@
 import pytest
-from document.rag.query.router.classifier import QueryClassifier, QueryType, ClassificationResult
-from document.rag.query.router.rules import RoutingRules, RetrievalPlan, BackendType
-from document.rag.query.router.fusion import RRFFusion, WeightedFusion, CascadeFusion, FusionFactory
-from document.rag.pipeline.index.chunker import RecursiveChunker, MarkdownChunker, create_chunker
-from document.rag.pipeline.index.embedder import Embedder
-from document.rag.query.rewrite.hyde import HyDERewriter
-from document.rag.query.rewrite.multi_query import MultiQueryExpander, QueryRewriterPipeline
+from document.rag.application.retrieval.router.classifier import QueryClassifier, QueryType, ClassificationResult
+from document.rag.application.retrieval.router.rules import RoutingRules, RetrievalPlan, BackendType
+from document.rag.application.retrieval.router.fusion import RRFFusion, WeightedFusion, CascadeFusion, FusionFactory
+from document.rag.application.indexing.chunker import RecursiveChunker, MarkdownChunker, create_chunker
+from document.rag.application.indexing.embedder import Embedder
+from document.rag.application.retrieval.rewrite.hyde import HyDERewriter
+from document.rag.application.retrieval.rewrite.multi_query import MultiQueryExpander, QueryRewriterPipeline
 from core.ports.chunker import ChunkStrategy
 from core.domain.evidence import Evidence
 

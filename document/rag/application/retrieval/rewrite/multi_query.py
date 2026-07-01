@@ -52,7 +52,7 @@ class MultiQueryExpander:
             
             return all_queries
             
-        except Exception as e:
+        except (RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
             self._logger.error(f"Multi-query expansion failed: {e}")
             return [query]
     

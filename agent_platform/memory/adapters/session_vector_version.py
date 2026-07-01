@@ -7,23 +7,21 @@ def compute_session_vector_index_version(
     cfg: dict[str, Any],
     *,
     config_dir: Optional[str] = None,
+    models: Any = None,
 ) -> str:
-    """Derive a stable version string from embedding backend + model + dimension."""
+    """Derive a stable version string from embedding role (config/models.yml)."""
     explicit = cfg.get("session_vector_index_version")
     if explicit:
         return str(explicit)
 
-    backend = str(cfg.get("session_embedding_backend", "mock")).lower()
-    dim = int(cfg.get("session_embedding_dim", 64))
+    try:
+        if models is None and config_dir:
+            from document.rag.bootstrap.model_bridge import ensure_model_registry
 
-    if backend == "local_bge" and config_dir:
-        try:
-            from document.rag.config import load_rag_pipeline_config
+            models = ensure_model_registry(None, config_dir=config_dir)
+        if models is not None:
+            return models.get_embedding_version_key("embedding")
+    except Exception:
+        pass
 
-            rag_cfg = load_rag_pipeline_config(config_dir=config_dir)
-            model = rag_cfg.embedding.model_path or "local_bge"
-            return f"{backend}:{model}:{dim}"
-        except Exception:
-            pass
-
-    return f"{backend}:{dim}"
+    return "embedding:unknown"

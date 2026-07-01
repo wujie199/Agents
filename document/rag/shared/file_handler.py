@@ -31,7 +31,7 @@ def get_file_md5_hex(file_path:str):
             """
             md5_hex = md5_obj.hexdigest()
             return md5_hex
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error(f"è®¡ç®æä»¶MD5{file_path}å¤±è´¥: {str(e)}")
         return None
 

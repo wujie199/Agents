@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 from core.ports.ingest import IngestResult, IngestStatus
-from document.rag.adapters.metadata.rule_keyword import (
+from document.rag.components.metadata.rule_keyword import (
     RuleKeywordMetadataEnricher,
     TaggingRule,
     load_tagging_rules,
 )
-from document.rag.application.metadata.pipeline import apply_metadata_enrichment
+from document.rag.application.metadata_pipeline import apply_metadata_enrichment
 from document.rag.config import MetadataConfig, RagPipelineConfig
 
 

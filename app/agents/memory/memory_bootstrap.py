@@ -88,10 +88,12 @@ async def bootstrap_memory_runtime(
     data_dir: str = "data",
     config_dir: str = "config",
     profile: str = "dev",
+    skip_vector_reindex: bool = False,
 ) -> dict[str, Any]:
     """
     dev 启动一次：目录、L4 seed、ensure_session、会话级向量 reindex。
     production 仅 ensure_session + 目录检查。
+    skip_vector_reindex=True 时跳过向量 reindex（Web 首屏预热可后台补跑）。
     """
     mem_cfg = load_memory_config(f"{config_dir}/memory.yml")
     req = ctx.request
@@ -120,10 +122,12 @@ async def bootstrap_memory_runtime(
     await memory.ensure_session(req)
     report["memory_ready"] = True
 
-    if profile == "dev":
+    if profile == "dev" and not skip_vector_reindex:
         report["vector_reindex"] = await bootstrap_session_vectors(
             memory, req, mem_cfg
         )
+    elif profile == "dev" and skip_vector_reindex:
+        report["vector_reindex"] = {"skipped": True, "reason": "deferred"}
 
     if isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra["memory_bootstrap"] = report

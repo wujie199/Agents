@@ -4,18 +4,22 @@ import pytest
 
 from core.ports.index import IndexProfile, IndexResult
 from core.ports.ingest import IngestStatus
-from document.rag.bridges.knowledge_base_adapter import KnowledgeBasePortAdapter
+from document.rag.facades.knowledge_base import KnowledgeBasePortAdapter
 from document.rag.config import RagPipelineConfig
-from document.rag.pipeline.index.mock_embedding import MockEmbeddingModel
-from document.rag.pipeline.index.service import IndexService
-from document.rag.pipeline.ingest.adapters.plain_text_adapter import PlainTextIngestAdapter
+from dataclasses import replace
+from document.rag.components.embedding.mock import MockEmbeddingModel
+from document.rag.application.indexing.service import IndexService
+from document.rag.components.ingest.plain_text_adapter import PlainTextIngestAdapter
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 
 
 class TestIndexPort:
     def test_index_profile_vector_only_skips_side_indexes(self, tmp_path):
-        config = RagPipelineConfig(collection_name="idx_prof", enable_graph_index=True)
-        config.retrieval.enable_sql = True
+        config = RagPipelineConfig(
+            collection_name="idx_prof",
+            enable_graph_index=True,
+            retrieval=replace(RagPipelineConfig().retrieval, enable_sql=True),
+        )
         vector = ChromaVectorAdapter(persist_directory=str(tmp_path / "chroma"))
         index = IndexService(
             vector_port=vector,

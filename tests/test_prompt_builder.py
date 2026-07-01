@@ -34,6 +34,31 @@ def test_filter_evidence_bundle_all_below_threshold():
     assert filtered.error_code == "rag_below_min_score"
 
 
+def test_filter_evidence_bundle_uses_rerank_score():
+    bundle = EvidenceBundle(
+        evidences=[
+            Evidence(
+                id="1",
+                content="高相关",
+                source_type=SourceType.VECTOR,
+                score=0.1,
+                metadata={"rerank_score": 0.9},
+            ),
+            Evidence(
+                id="2",
+                content="低相关",
+                source_type=SourceType.VECTOR,
+                score=0.9,
+                metadata={"rerank_score": 0.2},
+            ),
+        ],
+        empty=False,
+    )
+    filtered = filter_evidence_bundle(bundle, min_score=0.5)
+    assert len(filtered.evidences) == 1
+    assert filtered.evidences[0].id == "1"
+
+
 def test_format_evidence_bundle_respects_min_score():
     text = format_evidence_bundle(_bundle(), min_score=0.5)
     assert "高相关" in text

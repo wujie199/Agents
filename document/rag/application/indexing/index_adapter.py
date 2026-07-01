@@ -1,12 +1,13 @@
 """Backward compat: IndexPortAdapter delegates to IndexService."""
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from core.ports.chunker import ChunkStrategy
 from core.ports.storage.cache import CachePort
 from core.ports.storage.vector import VectorPort
 
-from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
+from document.rag.config import RagPipelineConfig
 from document.rag.application.indexing.service import IndexService
 
 
@@ -17,6 +18,7 @@ class IndexPortAdapter(IndexService):
         self,
         vector_port: VectorPort,
         embedding_model: Any,
+        config: RagPipelineConfig,
         chunker: Optional[Any] = None,
         cache_port: Optional[CachePort] = None,
         chunk_strategy: ChunkStrategy = ChunkStrategy.RECURSIVE,
@@ -24,15 +26,15 @@ class IndexPortAdapter(IndexService):
         chunk_overlap: int = 50,
         batch_size: int = 32,
         model_version: str = "v1",
-        config: Optional[RagPipelineConfig] = None,
     ):
-        cfg = config or load_rag_pipeline_config()
+        overrides: dict = {}
         if chunk_size != 500:
-            cfg.chunk_size = chunk_size
+            overrides["chunk_size"] = chunk_size
         if chunk_overlap != 50:
-            cfg.chunk_overlap = chunk_overlap
-        cfg.model_version = model_version
-        cfg.embedding_batch_size = batch_size
+            overrides["chunk_overlap"] = chunk_overlap
+        overrides["model_version"] = model_version
+        overrides["embedding_batch_size"] = batch_size
+        cfg = replace(config, **overrides) if overrides else config
         super().__init__(
             vector_port=vector_port,
             embedding_model=embedding_model,

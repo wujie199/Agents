@@ -8,9 +8,17 @@ from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import _format_turns_for_summary
 from app.agents.prompts.prompt_builder import (
     EVIDENCE_GROUNDING_RULES,
+    RAG_MISS_GROUNDING_RULES,
     format_evidence_bundle,
+    format_rag_miss_notice,
     build_chat_messages,
 )
+
+
+def test_format_rag_miss_notice():
+    text = format_rag_miss_notice(strict=True)
+    assert RAG_MISS_GROUNDING_RULES in text
+    assert "未找到" in text
 
 
 def test_format_evidence_strict_grounding():

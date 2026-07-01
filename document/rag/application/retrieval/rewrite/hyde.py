@@ -51,7 +51,7 @@ class HyDERewriter:
                 hypothesis = response.content if hasattr(response, 'content') else str(response)
                 hypotheses.append(hypothesis.strip())
                 
-            except Exception as e:
+            except (RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
                 self._logger.error(f"Hypothesis generation failed: {e}")
                 hypotheses.append(query)
         

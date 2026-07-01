@@ -159,7 +159,20 @@ class ChromaVectorAdapter:
     def count(self, collection: str) -> int:
         col = self._get_collection(collection)
         return col.count()
-    
+
+    def count_by_filter(self, collection: str, filter: dict) -> int:
+        col = self._get_collection(collection)
+        results = col.get(where=_normalize_where(filter))
+        return len(results.get("ids") or [])
+
+    def delete_collection(self, collection: str) -> None:
+        """删除集合并清缓存（embedding 维度变更时需重建）。"""
+        try:
+            self._client.delete_collection(collection)
+        except Exception:
+            pass
+        self._collections.pop(collection, None)
+
     def health(self) -> dict:
         try:
             self._client.heartbeat()

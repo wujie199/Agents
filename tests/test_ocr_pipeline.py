@@ -14,7 +14,7 @@ from document.ocr.processor import (
 )
 from document.rag.config import IngestConfig, RagPipelineConfig
 from document.rag.adapters.registry import build_ingest
-from document.rag.adapters.ingest.ocr_processor_adapter import OcrProcessorIngestAdapter
+from document.rag.components.ingest.ocr_processor import OcrProcessorIngestAdapter
 
 
 def test_get_model_root_override(tmp_path):

@@ -6,8 +6,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
+
+_think_dbg = logging.getLogger("thinking_debug")
 
 from core.composition.run_context import RunContext
 
@@ -107,6 +110,7 @@ async def run_chat_turn_langgraph(
         rag_empty=bool(final.get("rag_empty", True)),
         history_turns=len(history),
         evidences_summary=final.get("evidences_summary") or [],
+        memory_summary=final.get("memory_summary") or {},
     )
 
 
@@ -119,6 +123,7 @@ async def _stream_direct_after_prepare(
     evidence_count: int,
     rag_empty: bool,
     evidences_summary: list | None = None,
+    memory_summary: dict | None = None,
 ) -> AsyncIterator[str]:
     """prepare 完成后直连 LLM 流式 + persist。"""
     yield json.dumps(
@@ -127,6 +132,7 @@ async def _stream_direct_after_prepare(
             "evidence_count": evidence_count,
             "rag_empty": rag_empty,
             "evidences_summary": evidences_summary or [],
+            "memory_summary": memory_summary or {},
             "stream": "direct_llm",
         },
         ensure_ascii=False,
@@ -216,6 +222,11 @@ async def stream_chat_turn_langgraph_events(
     parts: list[str] = []
     final_state: dict[str, Any] = {}
     direct_handled = False
+    if isinstance(getattr(ctx, "extra", None), dict):
+        import uuid as _uuid
+
+        ctx.extra["_active_turn_id"] = _uuid.uuid4().hex[:12]
+        ctx.extra.pop("_turn_persisted_id", None)
 
     # ── LLM 流式细粒度计时 ──
     _llm_t0 = time.perf_counter()
@@ -223,6 +234,7 @@ async def stream_chat_turn_langgraph_events(
     _llm_first_delta: float | None = None
     _llm_token_count = 0
     _llm_thinking_chars = 0
+    _reasoning_yielded_runs: set[str] = set()
 
     perf_begin(ctx, "stream_langgraph_events")
     try:
@@ -244,6 +256,7 @@ async def stream_chat_turn_langgraph_events(
                         evidence_count=int(output.get("evidence_count") or 0),
                         rag_empty=bool(output.get("rag_empty", True)),
                         evidences_summary=output.get("evidences_summary") or [],
+                        memory_summary=output.get("memory_summary") or {},
                     ):
                         yield payload
                     direct_handled = True
@@ -257,6 +270,7 @@ async def stream_chat_turn_langgraph_events(
                             ),
                             "rag_empty": bool(output.get("rag_empty", True)),
                             "evidences_summary": output.get("evidences_summary") or [],
+                            "memory_summary": output.get("memory_summary") or {},
                             "stream": "langgraph",
                         },
                         ensure_ascii=False,
@@ -275,8 +289,15 @@ async def stream_chat_turn_langgraph_events(
                 )
                 reasoning = additional_kwargs.get("reasoning_content")
                 if reasoning:
+                    _run_id = event.get("run_id")
+                    if _run_id:
+                        _reasoning_yielded_runs.add(_run_id)
                     if _llm_first_thinking is None:
                         _llm_first_thinking = time.perf_counter()
+                        _think_dbg.debug(
+                            "[THINK-5 langgraph.stream] 首个 thinking 事件: run_id=%s reasoning=%r",
+                            _run_id, str(reasoning)[:50],
+                        )
                     _llm_thinking_chars += len(str(reasoning))
                     yield json.dumps(
                         {"type": "thinking", "text": str(reasoning)},
@@ -291,6 +312,44 @@ async def stream_chat_turn_langgraph_events(
                     yield json.dumps(
                         {"type": "delta", "text": text}, ensure_ascii=False
                     )
+            # 兜底：当 on_chat_model_stream 未触发时，从 on_chat_model_end 提取 reasoning
+            if kind == "on_chat_model_end":
+                _run_id = event.get("run_id", "")
+                if _run_id not in _reasoning_yielded_runs:
+                    _end_output = (event.get("data") or {}).get("output")
+                    _msg = None
+                    if _end_output is not None:
+                        if hasattr(_end_output, "generations") and _end_output.generations:
+                            _msg = _end_output.generations[0].message
+                        elif hasattr(_end_output, "content"):
+                            _msg = _end_output
+                    if _msg is not None:
+                        _ak = getattr(_msg, "additional_kwargs", None) or {}
+                        _reasoning = _ak.get("reasoning_content")
+                        if _reasoning:
+                            if _llm_first_thinking is None:
+                                _llm_first_thinking = time.perf_counter()
+                            _llm_thinking_chars += len(str(_reasoning))
+                            _think_dbg.debug(
+                                "[THINK-5 langgraph.end] 兜底 thinking: run_id=%s reasoning_chars=%d",
+                                _run_id, len(str(_reasoning)),
+                            )
+                            yield json.dumps(
+                                {"type": "thinking", "text": str(_reasoning)},
+                                ensure_ascii=False,
+                            )
+                            _reasoning_yielded_runs.add(_run_id)
+                        # 当无 on_chat_model_stream 事件时，也兜底输出 content
+                        _content = getattr(_msg, "content", None)
+                        if _content and not parts:
+                            _text = str(_content)
+                            if _llm_first_delta is None:
+                                _llm_first_delta = time.perf_counter()
+                            _llm_token_count += 1
+                            parts.append(_text)
+                            yield json.dumps(
+                                {"type": "delta", "text": _text}, ensure_ascii=False
+                            )
             if kind == "on_chain_end" and event.get("name") == "LangGraph":
                 data = event.get("data") or {}
                 final_state = data.get("output") or {}
@@ -309,6 +368,7 @@ async def stream_chat_turn_langgraph_events(
                     "evidence_count": int(final.get("evidence_count") or 0),
                     "rag_empty": bool(final.get("rag_empty", True)),
                     "evidences_summary": final.get("evidences_summary") or [],
+                    "memory_summary": final.get("memory_summary") or {},
                     "stream": "batch",
                 },
                 ensure_ascii=False,

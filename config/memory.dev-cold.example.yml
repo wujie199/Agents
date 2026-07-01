@@ -22,8 +22,6 @@ use_llm_summarize: true
 
 enable_session_vector_index: false
 session_hybrid_search: true
-session_embedding_backend: mock
-session_embedding_dim: 64
 
 archive_backend: sqlite
 archive_sqlite_path: data/session_archive.db

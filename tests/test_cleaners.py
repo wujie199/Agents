@@ -1,7 +1,7 @@
 import pytest
 from core.ports.cleaner import DocumentType, CleaningLevel
-from document.rag.bridges.composite_cleaner import CompositeCleaner, CleanerAdapter
-from document.rag.bridges.cleaners.base_cleaners import (
+from document.rag.components.cleaner.composite import CompositeCleaner, CleanerAdapter
+from document.rag.components.cleaner.base import (
     WhitespaceCleaner,
     SpecialCharCleaner,
     HtmlCleaner,
@@ -10,7 +10,7 @@ from document.rag.bridges.cleaners.base_cleaners import (
     NoiseCleaner,
     LengthFilterCleaner,
 )
-from document.rag.bridges.cleaner_factory import (
+from document.rag.components.cleaner.factory import (
     build_default_cleaner,
     build_html_cleaner,
     build_legal_cleaner,
@@ -80,7 +80,7 @@ class TestBaseCleaners:
 class TestDomainCleaners:
     
     def test_legal_document_cleaner(self):
-        from document.rag.bridges.cleaners.domain_cleaners import LegalDocumentCleaner
+        from document.rag.components.cleaner.domain import LegalDocumentCleaner
         cleaner = LegalDocumentCleaner()
         text = "第一条 本法适用区域。第二条 以下情形除外。"
         result = cleaner.clean(text)
@@ -88,14 +88,14 @@ class TestDomainCleaners:
         assert "第二条" in result
     
     def test_technical_doc_cleaner(self):
-        from document.rag.bridges.cleaners.domain_cleaners import TechnicalDocCleaner
+        from document.rag.components.cleaner.domain import TechnicalDocCleaner
         cleaner = TechnicalDocCleaner()
         text = "```python\nprint('hello')\n```\nå¸¸é MAX_VALUE = 100"
         result = cleaner.clean(text)
         assert "MAX_VALUE" in result
     
     def test_medical_doc_cleaner(self):
-        from document.rag.bridges.cleaners.domain_cleaners import MedicalDocCleaner
+        from document.rag.components.cleaner.domain import MedicalDocCleaner
         cleaner = MedicalDocCleaner()
         text = "门诊号：ABC123\n患者姓名：张三\n年龄：45岁"
         result = cleaner.clean(text)

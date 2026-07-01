@@ -267,7 +267,7 @@ Return only the classification type."""
                         keywords=features.get('keywords', [])
                     )
             
-        except Exception as e:
+        except (RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
             self._logger.warning(f"LLM classification failed: {e}")
         
         return ClassificationResult(

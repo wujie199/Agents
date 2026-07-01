@@ -165,6 +165,7 @@ class MarkdownChunker:
         for section in sections:
             content = section["content"]
             header = section.get("header", "")
+            section_path = header
             
             full_content = f"{header}\n\n{content}" if header else content
             
@@ -180,6 +181,7 @@ class MarkdownChunker:
                         "strategy": "markdown",
                         "header": header,
                         "level": section.get("level", 0),
+                        "section_path": section_path,
                     },
                 ))
                 chunk_idx += 1
@@ -196,7 +198,7 @@ class MarkdownChunker:
                         content=sub.content,
                         doc_id=doc_id,
                         chunk_index=chunk_idx,
-                        metadata={**sub.metadata, "header": header},
+                        metadata={**sub.metadata, "header": header, "section_path": section_path},
                     ))
                     chunk_idx += 1
         
@@ -282,6 +284,10 @@ def create_chunker(
         from document.rag.application.indexing.faq_chunker import FaqChunker
 
         return FaqChunker(**kwargs)
+    if strategy == ChunkStrategy.ARTICLE:
+        from document.rag.application.indexing.article_chunker import ArticleChunker
+
+        return ArticleChunker(**kwargs)
     if strategy == ChunkStrategy.RECURSIVE:
         return RecursiveChunker(**kwargs)
     if strategy == ChunkStrategy.MARKDOWN:
@@ -299,5 +305,6 @@ def parse_chunk_strategy(name: str) -> ChunkStrategy:
         "markdown": ChunkStrategy.MARKDOWN,
         "fixed": ChunkStrategy.FIXED,
         "faq": ChunkStrategy.FAQ,
+        "article": ChunkStrategy.ARTICLE,
     }
     return mapping.get(key, ChunkStrategy.RECURSIVE)

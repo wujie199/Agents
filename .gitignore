@@ -31,3 +31,24 @@ logs/
 # Runtime data (optional local artifacts)
 data/index/
 data/cache/
+data/chroma/
+data/chroma_dev/
+data/rag_offline/
+data/bm25_index/
+data/session_vectors/
+data/logs/
+data/outputs/
+data/objects/
+data/test_objects/
+data/test_chroma/
+data/test_memory/
+data/memory/
+data/memory_dev/
+data/memory_prod/
+data/memory_cli_store/
+data/external_profiles/
+data/json/
+data/*.db
+data/*.lock
+app/.cursor/
+data/rag_eval/results/

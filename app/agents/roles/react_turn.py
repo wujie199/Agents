@@ -11,7 +11,7 @@ from core.composition.run_context import RunContext
 from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.prompts.llm_stream import stream_llm_text
 from app.agents.memory.memory_tools import build_memory_tools
-from app.runtime.adapters.langgraph.model_bridge import PortChatModel, _message_to_dict
+from app.runtime.adapters.langgraph.model_bridge import PortChatModel, _message_to_dict, filter_messages_for_llm
 
 
 def dict_messages_to_lc(messages: list[dict[str, str]]) -> list[BaseMessage]:
@@ -75,7 +75,8 @@ async def stream_direct_llm(
 ) -> AsyncIterator[str]:
     """知识类直连 LLM token 流；无 astream 时回退整块输出。"""
     llm = ctx.get_model(chat_cfg.model_role)
-    dict_messages = [_message_to_dict(m) for m in lc_messages]
+    dict_messages = [_message_to_dict(m) for m in filter_messages_for_llm(lc_messages)]
+    dict_messages = [d for d in dict_messages if d]
     async for delta in stream_llm_text(llm, dict_messages):
         yield delta
 

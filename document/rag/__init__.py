@@ -3,12 +3,15 @@ from document.rag.bootstrap.offline import (
     create_offline_index_service,
     load_offline_config,
 )
-from document.rag.bootstrap.online import build_rag_stack
+from document.rag.bootstrap.online import RagStack, build_rag_stack
 from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
 from document.rag.facades.rag import RAGPortAdapter
+from document.rag.adapter import RagAdapter
 
 __all__ = [
+    "RagStack",
     "RAGPortAdapter",
+    "RagAdapter",
     "RagPipelineConfig",
     "load_rag_pipeline_config",
     "build_rag_stack",

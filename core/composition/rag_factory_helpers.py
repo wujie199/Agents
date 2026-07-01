@@ -1,6 +1,7 @@
 """兼容层：在线 RAG 组装已迁至 document.rag.bootstrap.online。"""
 
 from document.rag.bootstrap.online import (
+    RagStack,
     build_rag_stack,
     build_retrieval_router,
     resolve_embedding_model,
@@ -8,6 +9,7 @@ from document.rag.bootstrap.online import (
 )
 
 __all__ = [
+    "RagStack",
     "build_rag_stack",
     "build_retrieval_router",
     "resolve_embedding_model",

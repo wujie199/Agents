@@ -1,8 +1,5 @@
-# 可选覆盖（默认 config/memory.yml 已开启向量 + mock embedding）
-# 仅当需要 local_bge 时: MEMORY_CONFIG=config/memory.dev-vector.example.yml
-#
-# local_bge 需本机已配置 embedding（见 config/rag_pipeline.yml）；
-# 无模型时可改为 session_embedding_backend: mock（仅验证 reindex 流程）。
+# 可选覆盖（embedding 与 RAG 共用 config/models.yml roles.embedding）
+# 仅当需要调整向量目录等: MEMORY_CONFIG=config/memory.dev-vector.example.yml
 
 hot_memory_max_chars: 2200
 user_memory_max_chars: 1375
@@ -28,8 +25,6 @@ enable_session_vector_index: true
 session_vector_dir: data/session_vectors_dev
 session_vector_collection: session_messages
 session_hybrid_search: true
-session_embedding_backend: local_bge
-session_embedding_dim: 1024
 session_vector_embed_batch_size: 32
 session_vector_auto_reindex_on_version_change: true
 reindex_batch_size: 200

@@ -116,7 +116,7 @@ def _build_memory_port(
     )
     external = build_external_memory(cfg)
     session_vector_index = build_session_vector_index(
-        cfg, data_dir=data_dir, config_dir=config_dir
+        cfg, data_dir=data_dir, config_dir=config_dir, models=models
     )
     encrypt_at_rest = cfg.get("cold_archive_encrypt_at_rest", False)
     encryption_key = resolve_encryption_key(
@@ -265,7 +265,7 @@ def build_production_context(
     models = ModelRegistry(config_path=f"{config_dir}/models.yml")
 
     # ── RAG 栈 ──
-    rag, index_port, knowledge_base, _, _ = build_rag_stack(
+    stack = build_rag_stack(
         models=models,
         vector_port=storage.vector,
         cache_port=storage.cache,
@@ -275,6 +275,9 @@ def build_production_context(
         privacy_port=infra.privacy,
         data_dir=data_dir,
     )
+    rag = stack.rag
+    index_port = stack.index_port
+    knowledge_base = stack.knowledge_base
 
     # ── 工具 ──
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
@@ -370,7 +373,7 @@ def build_development_context(
     chroma_dir, rag_data_dir = _resolve_dev_rag_paths(data_dir)
     from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
     dev_vector = ChromaVectorAdapter(persist_directory=chroma_dir)
-    rag, index_port, knowledge_base, _, _ = build_rag_stack(
+    stack = build_rag_stack(
         models=models,
         vector_port=dev_vector,
         cache_port=storage.cache,
@@ -380,6 +383,9 @@ def build_development_context(
         privacy_port=infra.privacy,
         data_dir=rag_data_dir,
     )
+    rag = stack.rag
+    index_port = stack.index_port
+    knowledge_base = stack.knowledge_base
 
     # ── 工具 ──
     from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter

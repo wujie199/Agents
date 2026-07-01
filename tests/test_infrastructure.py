@@ -16,17 +16,18 @@ from agent_platform.storage.adapters.redis.cache_adapter import (
 class TestConfigPortAdapter:
     def test_load_config(self):
         adapter = ConfigPortAdapter()
-        config = adapter.load("llm")
-        assert "chat_model_name" in config
+        config = adapter.load("models")
+        assert "instances" in config
+        assert "roles" in config
 
     def test_get_nested_value(self):
         adapter = ConfigPortAdapter()
-        model_name = adapter.get("llm.chat_model_name")
-        assert model_name == "kimi-k2.6"
+        model_name = adapter.get("models.instances.dashscope_chat.model_name")
+        assert model_name == "qwen3.6-plus"
 
     def test_get_with_default(self):
         adapter = ConfigPortAdapter()
-        value = adapter.get("llm.nonexistent", default="default_value")
+        value = adapter.get("models.nonexistent", default="default_value")
         assert value == "default_value"
 
 

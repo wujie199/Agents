@@ -1,5 +1,5 @@
 # 对话 Agent（企业级记忆 Context + Path B 工具）
-# LLM：优先外置盘/Ollama → DashScope qwen3.6-plus（config/models.yml）
+# LLM 角色见 config/models.yml（main_llm / router_llm / memory_summarizer_llm）
 chat:
   enable_rag: true
   max_history_turns: 6
@@ -47,6 +47,8 @@ chat:
   rolling_summary_user_only: true
   # 有 RAG 证据时强制 grounding
   evidence_strict_grounding: true
+  # 知识类 RAG 未命中时明确告知用户，禁止编造
+  refuse_hallucination_on_rag_miss: true
   # 回忆未命中时提示 Agent 调用 session_search 工具
   recall_tool_hint_on_miss: true
   # LLM 意图路由（默认开启，正则做硬规则快速通道，LLM 做软路由）

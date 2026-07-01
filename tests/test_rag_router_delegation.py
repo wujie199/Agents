@@ -5,10 +5,11 @@ import pytest
 from core.domain.context import RequestContext
 from core.domain.evidence import SourceType
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
-from document.rag.bridges.rag_port_adapter import RAGPortAdapter
+from document.rag.facades.rag import RAGPortAdapter
 from document.rag.config import RagPipelineConfig
-from document.rag.pipeline.index.mock_embedding import MockEmbeddingModel
-from document.rag.query.router.router import RetrievalRouter
+from dataclasses import replace
+from document.rag.components.embedding.mock import MockEmbeddingModel
+from document.rag.application.retrieval.router.router import RetrievalRouter
 
 
 class TestRouterDelegation:
@@ -16,9 +17,8 @@ class TestRouterDelegation:
         config = RagPipelineConfig(
             collection_name="router_test",
             enable_cache=False,
+            retrieval=replace(RagPipelineConfig().retrieval, enable_router=True, auto_route=False),
         )
-        config.retrieval.enable_router = True
-        config.retrieval.auto_route = False
 
         vector = ChromaVectorAdapter(persist_directory=str(tmp_path / "chroma"))
         embed = MockEmbeddingModel(48)
@@ -28,7 +28,7 @@ class TestRouterDelegation:
             collection_name=config.collection_name,
             enable_cache=False,
         )
-        from document.rag.pipeline.index.service import IndexService
+        from document.rag.application.indexing.service import IndexService
 
         index = IndexService(vector_port=vector, embedding_model=embed, config=config)
         asyncio.run(
@@ -65,9 +65,11 @@ class TestRouterDelegation:
         assert bundle.evidences[0].source_type == SourceType.VECTOR
 
     def test_auto_route_classifies_semantic(self, tmp_path):
-        config = RagPipelineConfig(collection_name="rt2", enable_cache=False)
-        config.retrieval.enable_router = True
-        config.retrieval.auto_route = True
+        config = RagPipelineConfig(
+            collection_name="rt2",
+            enable_cache=False,
+            retrieval=replace(RagPipelineConfig().retrieval, enable_router=True, auto_route=True),
+        )
 
         vector = ChromaVectorAdapter(persist_directory=str(tmp_path / "chroma2"))
         embed = MockEmbeddingModel(32)
@@ -91,7 +93,7 @@ class TestRouterDelegation:
             trace_id="tr2",
             channel="test",
         )
-        from document.rag.pipeline.index.service import IndexService
+        from document.rag.application.indexing.service import IndexService
 
         index = IndexService(vector_port=vector, embedding_model=embed, config=config)
         asyncio.run(

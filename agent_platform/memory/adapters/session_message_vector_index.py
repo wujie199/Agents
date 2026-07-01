@@ -48,6 +48,17 @@ class SessionMessageVectorIndex:
             return
         setter(self._collection, self._index_version)
 
+    def reset_collection(self) -> None:
+        """embedding 维度/版本变更时清空 Chroma collection。"""
+        deleter = getattr(self._vector, "delete_collection", None)
+        if callable(deleter):
+            deleter(self._collection)
+            self._logger.info(
+                "Session vector collection reset: %s (index_version=%s)",
+                self._collection,
+                self._index_version,
+            )
+
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         if hasattr(self._embedding, "aembed"):
             return await self._embedding.aembed(texts)
@@ -95,6 +106,53 @@ class SessionMessageVectorIndex:
             content=content,
             metadata=metadata,
         )
+
+    async def index_messages(self, records: List[dict]) -> int:
+        """批量 embed + upsert，减少 reindex 时的模型调用次数。"""
+        valid: List[dict] = []
+        for record in records:
+            content = (record.get("content") or "").strip()
+            if not content or content == "[redacted]" or record.get("redacted"):
+                continue
+            valid.append(record)
+        if not valid:
+            return 0
+
+        indexed = 0
+        for start in range(0, len(valid), self._embed_batch_size):
+            chunk = valid[start : start + self._embed_batch_size]
+            texts = [(r.get("content") or "").strip() for r in chunk]
+            vectors = await self._embed(texts)
+            vector_records = [
+                VectorRecord(
+                    id=r["message_id"],
+                    vector=vectors[i],
+                    metadata={
+                        "tenant_id": str(r.get("tenant_id", "")),
+                        "user_id": str(r.get("user_id", "")),
+                        "session_id": str(r.get("session_id", "")),
+                        "message_id": r["message_id"],
+                        "role": str(r.get("role", "user")),
+                        "ts": str(r.get("ts", "")),
+                        "record_type": "message",
+                    },
+                    content=texts[i],
+                )
+                for i, r in enumerate(chunk)
+            ]
+            await asyncio.to_thread(
+                self._vector.upsert,
+                self._collection,
+                vector_records,
+            )
+            indexed += len(chunk)
+        return indexed
+
+    def count_session_vectors(self, session_id: str) -> int:
+        counter = getattr(self._vector, "count_by_filter", None)
+        if counter is None:
+            return 0
+        return int(counter(self._collection, {"session_id": session_id}))
 
     async def index_tool_call(self, record: dict) -> None:
         tool_name = (record.get("tool_name") or "").strip()

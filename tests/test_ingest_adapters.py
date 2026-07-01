@@ -7,9 +7,9 @@ from core.ports.ingest import (
     IngestStatus,
     DocumentFormat,
 )
-from document.rag.pipeline.ingest.adapters.word_adapter import WordIngestAdapter
-from document.rag.pipeline.ingest.adapters.layout_ocr_adapter import LayoutOCRAdapter
-from document.rag.pipeline.ingest.adapters.simplified_adapter import (
+from document.rag.components.ingest.word_adapter import WordIngestAdapter
+from document.rag.components.ingest.layout_ocr_adapter import LayoutOCRAdapter
+from document.rag.components.ingest.simplified_adapter import (
     SimplifiedIngestAdapter,
     SimplifiedIngestPipeline,
     build_simplified_ingest_adapter,
@@ -245,7 +245,7 @@ class TestSimplifiedIngestPipeline:
             pytest.skip("python-docx not available")
     
     def test_pipeline_with_cleaner(self):
-        from document.rag.bridges.composite_cleaner import CleanerAdapter
+        from document.rag.components.cleaner.composite import CleanerAdapter
         
         adapter = build_simplified_ingest_adapter()
         cleaner = CleanerAdapter()

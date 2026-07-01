@@ -22,7 +22,7 @@ class LoggingMiddleware:
         state: Any,
         config: Any,
     ) -> Dict[str, Any]:
-        _logger.info("node=%s action=enter", node_name)
+        _logger.debug("node=%s action=enter", node_name)
         return {}
 
     async def on_exit(
@@ -45,7 +45,7 @@ class LoggingMiddleware:
                 duration_ms,
             )
         else:
-            _logger.info(
+            _logger.debug(
                 "node=%s action=exit duration_ms=%s",
                 node_name,
                 duration_ms,

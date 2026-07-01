@@ -31,7 +31,7 @@ from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAd
 from agent_platform.memory.adapters.session_message_vector_index import (
     SessionMessageVectorIndex,
 )
-from document.rag.adapters.embedding.mock import MockEmbeddingModel
+from document.rag.components.embedding.mock import MockEmbeddingModel
 
 
 def _ctx(session_id: str = "sess1", user_id: str = "user1") -> RequestContext:

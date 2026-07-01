@@ -3,17 +3,19 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from core.ports.chunker import ChunkStrategy
+from core.ports.chunker import ChunkStrategy, Chunk
 from core.ports.index import IndexProfile, IndexResult
 from core.ports.ingest import IngestResult, IngestStatus
+from core.ports.rag.embedding import EmbeddingPort
 from core.ports.storage.cache import CachePort
 from core.ports.storage.vector import VectorPort, VectorRecord
 
-from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
+from document.rag.config import RagPipelineConfig
 from document.rag.application.indexing.chunker import create_chunker, parse_chunk_strategy
 from document.rag.application.indexing.document_store import RagDocumentStore
 from document.rag.application.indexing.embedder import Embedder
 from document.rag.application.indexing.graph_sync import RagGraphSync
+from document.rag.shared.dedupe import dedupe_chunks, semantic_dedupe
 
 
 class IndexService:
@@ -22,15 +24,15 @@ class IndexService:
     def __init__(
         self,
         vector_port: VectorPort,
-        embedding_model: Any,
-        config: Optional[RagPipelineConfig] = None,
+        embedding_model: EmbeddingPort,
+        config: RagPipelineConfig,
         cache_port: Optional[CachePort] = None,
         chunk_strategy: Optional[ChunkStrategy] = None,
         sql_port: Optional[Any] = None,
         graph_port: Optional[Any] = None,
         bm25_index: Optional[Any] = None,
     ):
-        self._config = config or load_rag_pipeline_config()
+        self._config = config
         self._vector_port = vector_port
         self._embedding_model = embedding_model
         self._cache_port = cache_port
@@ -76,6 +78,31 @@ class IndexService:
             return IndexProfile.GRAPH_SIDECAR
         return IndexProfile.VECTOR_ONLY
 
+    def _dedupe_chunk_list(self, chunks: List[Chunk]) -> List[Chunk]:
+        if not chunks:
+            return chunks
+
+        if self._config.enable_chunk_dedupe:
+            payload = [
+                {"chunk_text": c.content, "_chunk": c} for c in chunks
+            ]
+            payload = dedupe_chunks(payload)
+            chunks = [item["_chunk"] for item in payload]
+
+        if self._config.enable_semantic_dedupe:
+            payload = [
+                {"chunk_text": c.content, "_chunk": c} for c in chunks
+            ]
+            payload = semantic_dedupe(
+                payload,
+                threshold=self._config.semantic_dedupe_threshold,
+            )
+            chunks = [item["_chunk"] for item in payload]
+
+        for idx, chunk in enumerate(chunks):
+            chunk.chunk_index = idx
+        return chunks
+
     async def index_document(
         self,
         doc_id: str,
@@ -90,6 +117,15 @@ class IndexService:
         metadata["doc_id"] = doc_id
 
         chunks = self._chunker.chunk(content, doc_id, metadata)
+        before = len(chunks)
+        chunks = self._dedupe_chunk_list(chunks)
+        if len(chunks) != before:
+            self._logger.info(
+                "Document %s deduped chunks %d -> %d",
+                doc_id,
+                before,
+                len(chunks),
+            )
         self._logger.info("Document %s split into %d chunks", doc_id, len(chunks))
 
         embeddings = await self._embedder.embed_chunks(chunks, tenant_id)
@@ -104,7 +140,7 @@ class IndexService:
             bm25_written = True
         try:
             written = await self._write_vectors(embeddings)
-        except Exception:
+        except (RuntimeError, ConnectionError, OSError, ValueError):
             if bm25_written and self._bm25_index is not None:
                 await asyncio.to_thread(
                     self._bm25_index.delete_by_doc_id,
@@ -194,7 +230,7 @@ class IndexService:
                 deleted,
             )
             return deleted > 0
-        except Exception as e:
+        except (RuntimeError, ConnectionError, OSError, ValueError) as e:
             self._logger.error("Failed to delete document %s: %s", doc_id, e)
             return False
 
@@ -237,7 +273,7 @@ class IndexService:
                 self._vector_port.count,
                 self._collection,
             )
-        except Exception:
+        except (ConnectionError, TimeoutError, OSError, RuntimeError):
             stats["vector_count"] = "unknown"
 
         if self._cache_port:
@@ -245,7 +281,7 @@ class IndexService:
             try:
                 version = await self._cache_get(version_key)
                 stats["index_version"] = version or 0
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError):
                 stats["index_version"] = "unknown"
 
         return stats

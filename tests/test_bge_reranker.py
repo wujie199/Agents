@@ -9,7 +9,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import pytest
 
-from document.rag.adapters.rerank.local_bge import LocalBgeReranker, print_rerank_report
+from document.rag.components.rerank.local_bge import LocalBgeReranker, print_rerank_report
 
 pytestmark = pytest.mark.skipif(
     not (__import__("pathlib").Path(__file__).resolve().parents[1]

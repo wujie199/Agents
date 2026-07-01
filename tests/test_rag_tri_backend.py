@@ -4,14 +4,15 @@ import pytest
 
 from core.domain.context import RequestContext
 from core.domain.evidence import Evidence, SourceType
-from document.rag.bridges.rag_port_adapter import RAGPortAdapter
+from document.rag.facades.rag import RAGPortAdapter
 from document.rag.config import RagPipelineConfig
-from document.rag.pipeline.index.mock_embedding import MockEmbeddingModel
-from document.rag.pipeline.index.mock_rerank import MockRerankModel
-from document.rag.pipeline.index.service import IndexService
-from document.rag.query.retrieval.rerank_utils import apply_rerank
-from document.rag.query.rewrite.multi_query import QueryRewriterPipeline
-from document.rag.query.router.router import RetrievalRouter
+from dataclasses import replace
+from document.rag.components.embedding.mock import MockEmbeddingModel
+from document.rag.components.rerank.mock import MockRerankModel
+from document.rag.application.indexing.service import IndexService
+from document.rag.application.retrieval.rerank_utils import apply_rerank
+from document.rag.application.retrieval.rewrite.multi_query import QueryRewriterPipeline
+from document.rag.application.retrieval.router.router import RetrievalRouter
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 from agent_platform.storage.adapters.graph.memory_graph_adapter import MemoryGraphAdapter
 from agent_platform.storage.adapters.sqlite.relational_adapter import AsyncSQLiteRelationalAdapter
@@ -29,12 +30,15 @@ class TestTriBackendRerankRewrite:
             collection_name="tri",
             enable_cache=False,
             enable_graph_index=True,
+            retrieval=replace(
+                RagPipelineConfig().retrieval,
+                enable_router=True,
+                enable_sql=True,
+                enable_graph=True,
+                enable_rerank=True,
+            ),
+            rewrite=replace(RagPipelineConfig().rewrite, enable_multi_query=True),
         )
-        config.retrieval.enable_router = True
-        config.retrieval.enable_sql = True
-        config.retrieval.enable_graph = True
-        config.retrieval.enable_rerank = True
-        config.rewrite.enable_multi_query = True
 
         vector = ChromaVectorAdapter(persist_directory=str(tmp_path / "chroma"))
         sql = AsyncSQLiteRelationalAdapter(db_path=str(tmp_path / "rag.db"))

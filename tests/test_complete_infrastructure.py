@@ -2,7 +2,8 @@ import pytest
 import asyncio
 from core.domain.context import RequestContext
 from agent_platform.model.registry import ModelRegistry
-from document.rag.bridges.rag_port_adapter import RAGPortAdapter
+from document.rag.facades.rag import RAGPortAdapter
+from document.rag.config import RagPipelineConfig
 from agent_platform.tools.adapters.tool_port_adapter import ToolPortAdapter
 from agent_platform.memory.adapters.memory_port_adapter import MemoryPortAdapter
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
@@ -19,8 +20,8 @@ class TestModelRegistry:
         registry = ModelRegistry(config_path="config/models.yml")
         role = registry._roles.get("main_llm")
         assert role is not None
-        assert role.profile == "dashscope_main"
-        assert registry._profiles["dashscope_main"].model_name == "qwen3.6-plus"
+        assert role.profile == "dashscope_chat"
+        assert registry._profiles["dashscope_chat"].model_name == "qwen3.6-plus"
 
     def test_main_llm_local_hf_when_weights_present(self, tmp_path, monkeypatch):
         root = tmp_path / "llm"
@@ -31,8 +32,10 @@ class TestModelRegistry:
         monkeypatch.setenv("LOCAL_LLM_ROOT", str(root))
         registry = ModelRegistry(config_path="config/models.yml")
         role = registry._roles.get("main_llm")
-        assert role.profile == "local_hf_chat"
-        assert "dashscope_main" in (role.fallback_chain or [])
+        assert role.profile == "dashscope_chat"
+        router = registry._roles.get("router_llm")
+        assert router.profile == "local_hf_chat"
+        assert "dashscope_chat" in (router.fallback_chain or [])
 
     def test_get_model_info(self):
         registry = ModelRegistry(config_path="config/models.yml")
@@ -52,9 +55,10 @@ class TestModelRegistry:
 class TestRAGPortAdapter:
     def test_init(self):
         vector_port = ChromaVectorAdapter(persist_directory="data/test_chroma")
-        
+        config = RagPipelineConfig()
         rag = RAGPortAdapter(
             vector_port=vector_port,
+            config=config,
             enable_cache=False
         )
         
@@ -63,9 +67,10 @@ class TestRAGPortAdapter:
     @pytest.mark.asyncio
     async def test_health(self):
         vector_port = ChromaVectorAdapter(persist_directory="data/test_chroma")
-        
+        config = RagPipelineConfig()
         rag = RAGPortAdapter(
             vector_port=vector_port,
+            config=config,
             enable_cache=False
         )
         

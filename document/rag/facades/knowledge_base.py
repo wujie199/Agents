@@ -6,11 +6,11 @@ from core.ports.index import IndexPort, IndexProfile
 from core.ports.ingest import IngestConfig, IngestPort, IngestStatus
 from core.ports.knowledge_base import IngestAndIndexResult, KnowledgeBasePort
 from core.ports.privacy import PrivacyPort
-from document.rag.adapters.cleaning.factory import build_enterprise_cleaner
+from document.rag.components.cleaner.factory import build_enterprise_cleaner
 from document.rag.config import IngestConfig as PipelineIngestConfig, RagPipelineConfig
-from document.rag.application.cleaning.pipeline import apply_ingest_cleaning, parse_cleaning_level
-from document.rag.application.metadata.pipeline import apply_metadata_enrichment
-from document.rag.application.ingest.factory import detect_format
+from document.rag.application.cleaning_pipeline import apply_ingest_cleaning, parse_cleaning_level
+from document.rag.application.metadata_pipeline import apply_metadata_enrichment
+from document.rag.application.ingest_factory import detect_format
 
 __all__ = ["KnowledgeBasePortAdapter", "parse_cleaning_level"]
 
@@ -99,7 +99,7 @@ class KnowledgeBasePortAdapter:
                 doc_id=doc_id,
                 profile=profile,
             )
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
             self._logger.error("Index after ingest failed: %s", exc)
             return IngestAndIndexResult(
                 success=False,

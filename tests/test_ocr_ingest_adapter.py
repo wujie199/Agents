@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from document.rag.config import IngestConfig as PipelineIngestConfig, RagPipelineConfig
-from document.rag.adapters.ingest.ocr_processor_adapter import OcrProcessorIngestAdapter
-from document.rag.adapters.ingest.word_to_pdf import needs_pdf_conversion
-from document.rag.pipeline.ingest.factory import build_ingest_pipeline, detect_format
+from document.rag.components.ingest.ocr_processor import OcrProcessorIngestAdapter
+from document.rag.components.ingest.word_to_pdf import needs_pdf_conversion
+from document.rag.application.ingest_factory import build_ingest_pipeline, detect_format
 from core.ports.ingest import DocumentFormat, IngestConfig, IngestStatus
 
 
@@ -29,7 +29,7 @@ class TestOcrProcessorIngestAdapter:
         assert result.content == "纯文本直接读取"
         assert result.metadata.get("ocr_skipped") is True
 
-    @patch("document.rag.adapters.ingest.ocr_processor_adapter.OcrProcessorIngestAdapter._get_processor")
+    @patch("document.rag.components.ingest.ocr_processor.OcrProcessorIngestAdapter._get_processor")
     def test_pdf_uses_ocr_processor(self, mock_get_processor, tmp_path):
         mock_processor = MagicMock()
         mock_result = MagicMock()
@@ -49,8 +49,8 @@ class TestOcrProcessorIngestAdapter:
         assert result.metadata.get("ingest_backend") == "ocr_processor"
         mock_processor.process.assert_called_once()
 
-    @patch("document.rag.adapters.ingest.ocr_processor_adapter.convert_to_pdf")
-    @patch("document.rag.adapters.ingest.ocr_processor_adapter.OcrProcessorIngestAdapter._get_processor")
+    @patch("document.rag.components.ingest.ocr_processor.convert_to_pdf")
+    @patch("document.rag.components.ingest.ocr_processor.OcrProcessorIngestAdapter._get_processor")
     def test_word_converts_to_pdf_then_ocr(
         self, mock_get_processor, mock_convert, tmp_path
     ):
@@ -93,7 +93,7 @@ class TestIngestFactoryOcrOnly:
             ingest=PipelineIngestConfig(mode="structured"),
         )
         pipeline = build_ingest_pipeline(cfg)
-        from document.rag.pipeline.ingest.factory import RoutedIngestAdapter
+        from document.rag.application.ingest_factory import RoutedIngestAdapter
 
         assert isinstance(pipeline, RoutedIngestAdapter)
 

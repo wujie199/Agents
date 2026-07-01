@@ -144,9 +144,11 @@ async def hybrid_retrieve(
     vector_hits: List[Evidence] = []
     bm25_hits: List[Evidence] = []
 
-    if ret.enable_hybrid or ret.enable_vector_search:
+    async def _fetch_vector() -> List[Evidence]:
+        if not (ret.enable_hybrid or ret.enable_vector_search):
+            return []
         try:
-            vector_hits = filter_evidences_by_acl(
+            return filter_evidences_by_acl(
                 await vector_search(
                     vector_port,
                     embedding_model,
@@ -159,12 +161,15 @@ async def hybrid_retrieve(
                 ),
                 acl,
             )
-        except Exception as exc:
+        except (RuntimeError, ConnectionError, TimeoutError, OSError, ValueError) as exc:
             _log.warning("向量检索失败: %s", exc)
+            return []
 
-    if ret.enable_hybrid or ret.enable_bm25_search:
+    def _fetch_bm25() -> List[Evidence]:
+        if not (ret.enable_hybrid or ret.enable_bm25_search):
+            return []
         try:
-            bm25_hits = filter_evidences_by_acl(
+            return filter_evidences_by_acl(
                 bm25_search(
                     bm25_index,
                     query,
@@ -175,8 +180,31 @@ async def hybrid_retrieve(
                 ),
                 acl,
             )
-        except Exception as exc:
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
             _log.warning("BM25 检索失败: %s", exc)
+            return []
+
+    need_vector = ret.enable_hybrid or ret.enable_vector_search
+    need_bm25 = ret.enable_hybrid or ret.enable_bm25_search
+    tasks: list[Any] = []
+    task_labels: list[str] = []
+    if need_vector:
+        tasks.append(_fetch_vector())
+        task_labels.append("vector")
+    if need_bm25:
+        tasks.append(asyncio.to_thread(_fetch_bm25))
+        task_labels.append("bm25")
+
+    if tasks:
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for label, outcome in zip(task_labels, outcomes):
+            if isinstance(outcome, Exception):
+                _log.warning("%s 检索失败: %s", label, outcome)
+                continue
+            if label == "vector":
+                vector_hits = outcome
+            else:
+                bm25_hits = outcome
 
     if not vector_hits and not bm25_hits:
         return EvidenceBundle.empty_bundle(

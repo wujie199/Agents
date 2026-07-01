@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from document.rag.adapters.registry import build_bm25_index, build_embedding, build_rerank
+from document.rag.components.embedding.registry import build_embedding
+from document.rag.components.rerank.registry import build_rerank
+from document.rag.components.storage.registry import build_bm25_index
 from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
 
 _log = logging.getLogger("document.rag.bootstrap.query")
@@ -41,14 +43,14 @@ def create_query_stack(
     cfg = cfg or load_rag_pipeline_config(config_dir=config_dir)
     chroma_dir = str(data_dir / "chroma_dev")
     vector_port = ChromaVectorAdapter(persist_directory=chroma_dir)
-    embedding = build_embedding(cfg, config_dir=config_dir)
+    embedding = build_embedding(cfg)
     bm25_index = build_bm25_index(data_dir, cfg)
     rerank_model = build_rerank(cfg)
 
     if auto_rebuild_bm25 and bm25_index.document_count == 0:
         try:
             count = vector_port.count(cfg.collection_name)
-        except Exception:
+        except (RuntimeError, ConnectionError, OSError, ValueError):
             count = 0
         if count > 0:
             _log.warning(

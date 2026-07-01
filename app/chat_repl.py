@@ -517,6 +517,8 @@ async def _handle_line(
             print("\nassistant> ", end="", flush=True)
             rag_note = ""
             result_text = ""
+            thinking_acc = ""
+            first_delta = True
             async for payload in stream_chat_turn_events(
                 session_handle,
                 line,
@@ -530,10 +532,20 @@ async def _handle_line(
                         f"  (RAG: {event.get('evidence_count', 0)} 条证据"
                         f"{', 空' if event.get('rag_empty') else ''})"
                     )
+                elif event.get("type") == "thinking":
+                    thinking_acc += event.get("text", "")
+                    # ANSI dim (暗灰) 显示思考过程
+                    print(f"\033[2m{event.get('text', '')}\033[0m", end="", flush=True)
                 elif event.get("type") == "delta":
+                    if first_delta and thinking_acc:
+                        # 思考结束，正文开始前换行分隔
+                        print("\n\033[0m", end="", flush=True)
+                        first_delta = False
                     print(event.get("text", ""), end="", flush=True)
                 elif event.get("type") == "done":
                     result_text = event.get("assistant_text") or ""
+            if thinking_acc:
+                print(f"\033[0m  (思考 {len(thinking_acc)} 字)", end="")
             print(f"{rag_note}\n")
             agent_debug(
                 "TURN-OK",
@@ -649,7 +661,7 @@ async def chat_repl(
     else:
         set_debug_console(console_debug)
     set_memory_runtime_debug(trace_on)
-    set_memory_runtime_verbose(trace_on)
+    set_memory_runtime_verbose(debug and not debug_quiet)
     chat_cfg = load_chat_config(config_dir, profile=profile)
     if not enable_memory_tools:
         chat_cfg = replace(chat_cfg, enable_memory_tools=False)
@@ -736,34 +748,18 @@ async def chat_repl(
                 run_ctx, chat_cfg=chat_cfg
             )
 
-        print("对话 Agent（记忆 L1/L2 + RAG + 企业 Context）")
-        print(f"  tenant={tenant}  user={user}  session={session}")
         print(
-            f"  data_dir={data_dir}  rag={'on' if enable_rag else 'off'}"
-            f"  engine={engine}  profile={profile}"
+            f"Agents REPL  tenant={tenant} user={user} session={session} "
+            f"rag={'on' if enable_rag else 'off'} engine={engine} profile={profile} "
+            f"(输入 /help 查看命令)"
         )
-        print(f"  memory_tools={'on' if chat_cfg.enable_memory_tools else 'off'}")
-        mem_cfg = (run_ctx.extra or {}).get("memory_config_summary") or {}
-        if mem_cfg:
-            print(
-                f"  memory: archive={mem_cfg.get('archive_backend')}  "
-                f"cold={mem_cfg.get('enable_cold_archive')}"
-            )
-        if os.environ.get("MEMORY_CONFIG"):
-            print(f"  MEMORY_CONFIG={os.environ.get('MEMORY_CONFIG')}")
-        if stream_output:
-            print("  stream=on")
         if trace_on:
             mode = "auto(dev)" if auto_trace else ("quiet" if debug_quiet else "verbose")
             console = "on" if memory_debug_console_enabled() else "off"
-            cache_obj = (run_ctx.extra or {}).get("cache")
-            cache_name = type(cache_obj).__name__ if cache_obj else "none"
-            print(f"  memory_trace={mode}  console_detail={console}")
-            print(f"  session_search_cache={cache_name}")
-            print("  主日志: " + str(debug_log_path()))
-            print("  细粒度: " + str(agent_debug_log_path()))
-            print("  (关闭轮次控制台详情: MEMORY_DEBUG_CONSOLE=0)")
-        print(HELP)
+            print(
+                f"  debug: trace={mode} console={console} "
+                f"log={debug_log_path()}"
+            )
 
         while True:
             try:

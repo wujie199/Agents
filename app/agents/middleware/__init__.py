@@ -2,7 +2,7 @@
 """图级 Middleware 体系：洋葱模型包裹图节点。
 
 执行顺序：
-  TracingMiddleware → PolicyMiddleware → LoggingMiddleware
+  TracingMiddleware → TimingMiddleware → PolicyMiddleware → LoggingMiddleware
   → PrivacyMiddleware → [业务节点] → AuditMiddleware
 
 使用方式：

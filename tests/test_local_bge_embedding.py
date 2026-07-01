@@ -2,7 +2,7 @@
 
 import pytest
 
-from document.rag.adapters.embedding.local_bge import LocalBgeEmbedding
+from document.rag.components.embedding.local_bge import LocalBgeEmbedding
 
 
 @pytest.fixture

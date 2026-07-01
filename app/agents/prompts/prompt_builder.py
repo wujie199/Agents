@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from core.domain.evidence import DegradedReason, EvidenceBundle
+from core.domain.evidence import DegradedReason, Evidence, EvidenceBundle
 
 from app.agents.prompts.text_sanitize import sanitize_turn_content
 
@@ -18,6 +18,12 @@ EVIDENCE_GROUNDING_RULES = (
     "2. 可基于片段中的对比、限制或负面描述合理归纳（如「需人工操作」「成本较高」可归纳为缺点）；"
     "仅当片段完全无关时再说明「资料中未明确提及」，不要猜测。\n"
     "3. 优先引用片段原文，避免与历史对话中可能错误的 assistant 回复冲突。"
+)
+
+RAG_MISS_GROUNDING_RULES = (
+    "【知识库检索说明】本轮未在知识库中找到与问题相关的可靠片段。\n"
+    "请明确告知用户「当前知识库中未找到相关资料」，不要编造产品操作步骤、型号、政策或通用教程。\n"
+    "可简要说明可能原因（未入库、表述不匹配），并建议用户换关键词或上传相关文档。"
 )
 
 RECALL_TOOL_HINT = (
@@ -38,6 +44,13 @@ SKILL_TOOL_HINT = (
 )
 
 
+def _effective_evidence_score(evidence: Evidence) -> float:
+    raw = evidence.metadata.get("rerank_score")
+    if raw is not None:
+        return float(raw)
+    return float(evidence.score or 0.0)
+
+
 def filter_evidence_bundle(
     bundle: EvidenceBundle,
     *,
@@ -47,10 +60,10 @@ def filter_evidence_bundle(
     """按相关性分数过滤证据；可选保留 top-N 以免高分片段过少。"""
     if not bundle.evidences:
         return bundle
-    ranked = sorted(bundle.evidences, key=lambda ev: ev.score, reverse=True)
+    ranked = sorted(bundle.evidences, key=_effective_evidence_score, reverse=True)
     if min_score <= 0:
         return bundle
-    kept = [ev for ev in ranked if ev.score >= min_score]
+    kept = [ev for ev in ranked if _effective_evidence_score(ev) >= min_score]
     if min_keep > 0 and len(kept) < min_keep:
         seen = {ev.id for ev in kept}
         for ev in ranked:
@@ -73,6 +86,23 @@ def filter_evidence_bundle(
         degraded_reason=bundle.degraded_reason,
         error_code=bundle.error_code,
     )
+
+
+def format_rag_miss_notice(
+    bundle: EvidenceBundle | None = None,
+    *,
+    strict: bool = True,
+) -> str:
+    """知识类问题检索未命中时注入的反幻觉说明。"""
+    if not strict:
+        return ""
+    parts = [RAG_MISS_GROUNDING_RULES]
+    if bundle is not None and bundle.is_degraded() and bundle.degraded_reason:
+        code = f" code={bundle.error_code}" if bundle.error_code else ""
+        parts.append(
+            f"[检索状态: {bundle.degraded_reason.value}{code}]"
+        )
+    return "\n".join(parts)
 
 
 def format_evidence_bundle(

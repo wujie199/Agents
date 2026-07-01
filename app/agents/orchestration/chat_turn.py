@@ -28,6 +28,7 @@ class ChatTurnResult:
     rag_empty: bool = True
     history_turns: int = 0
     evidences_summary: list = None
+    memory_summary: dict = None
 
 
 async def run_chat_turn(
@@ -49,7 +50,7 @@ async def run_chat_turn(
     use_rag = cfg.enable_rag if enable_rag is None else enable_rag
     role = model_role or cfg.model_role
 
-    messages, ev_count, rag_empty, _mem_hash, evidences_summary = await build_turn_messages(
+    messages, ev_count, rag_empty, _mem_hash, evidences_summary, memory_summary = await build_turn_messages(
         ctx,
         user_message,
         cfg,
@@ -91,4 +92,5 @@ async def run_chat_turn(
         rag_empty=rag_empty,
         history_turns=len(history),
         evidences_summary=evidences_summary or [],
+        memory_summary=memory_summary or {},
     )

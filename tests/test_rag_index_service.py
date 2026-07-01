@@ -2,8 +2,8 @@ import asyncio
 import pytest
 
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
-from document.rag.pipeline.index.service import IndexService
-from document.rag.pipeline.index.mock_embedding import MockEmbeddingModel
+from document.rag.application.indexing.service import IndexService
+from document.rag.components.embedding.mock import MockEmbeddingModel
 from document.rag.config import RagPipelineConfig
 
 

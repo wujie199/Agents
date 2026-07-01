@@ -9,6 +9,7 @@ class ChunkStrategy(str, Enum):
     MARKDOWN = "markdown"
     FIXED = "fixed"
     FAQ = "faq"
+    ARTICLE = "article"
 
 
 @dataclass

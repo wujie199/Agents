@@ -36,8 +36,8 @@ def resolve_rewrite_llm(models: Any, config: RagPipelineConfig) -> Optional[Any]
         return None
     try:
         return models.get_model("router_llm")
-    except Exception:
+    except (KeyError, ValueError, RuntimeError):
         try:
             return models.get_model("main_llm")
-        except Exception:
+        except (KeyError, ValueError, RuntimeError):
             return None

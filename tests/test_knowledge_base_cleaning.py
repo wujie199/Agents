@@ -7,7 +7,7 @@ import pytest
 from core.ports.cleaner import CleaningLevel
 from core.ports.index import IndexProfile, IndexResult
 from core.ports.ingest import DocumentFormat, IngestResult, IngestStatus
-from document.rag.bridges.knowledge_base_adapter import KnowledgeBasePortAdapter
+from document.rag.facades.knowledge_base import KnowledgeBasePortAdapter
 
 
 @pytest.mark.asyncio

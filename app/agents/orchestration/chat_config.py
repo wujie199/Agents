@@ -55,6 +55,8 @@ class ChatAgentConfig:
     rolling_summary_user_only: bool = True
     # 有检索证据时强制 grounding，禁止编造未出现在证据中的事实
     evidence_strict_grounding: bool = True
+    # 知识类问题 RAG 未命中时禁止幻觉作答
+    refuse_hallucination_on_rag_miss: bool = True
     # 回忆预检索未命中时提示 Agent 调用 session_search 工具（Path B）
     recall_tool_hint_on_miss: bool = True
     retrieval_llm_router: bool = False
@@ -233,6 +235,12 @@ def load_chat_config(
         ),
         evidence_strict_grounding=bool(
             chat.get("evidence_strict_grounding", _DEFAULT.evidence_strict_grounding)
+        ),
+        refuse_hallucination_on_rag_miss=bool(
+            chat.get(
+                "refuse_hallucination_on_rag_miss",
+                _DEFAULT.refuse_hallucination_on_rag_miss,
+            )
         ),
         recall_tool_hint_on_miss=bool(
             chat.get("recall_tool_hint_on_miss", _DEFAULT.recall_tool_hint_on_miss)

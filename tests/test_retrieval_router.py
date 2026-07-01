@@ -156,7 +156,7 @@ async def _knowledge_session_search_rag_not_skipped():
     ctx = RunContext(request=req, memory=memory, rag=rag)
 
     cfg = _cfg(knowledge_session_search=True, l4_prefetch_on_knowledge=False)
-    _msgs, ev_count, rag_empty, _, _ = await build_turn_messages(
+    _msgs, ev_count, rag_empty, _, _, _ = await build_turn_messages(
         ctx, "扫地机器人品牌", cfg, enable_rag=True
     )
     assert ev_count == 1

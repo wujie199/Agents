@@ -7,7 +7,7 @@ import pytest
 
 from core.domain.context import ACL, RequestContext
 from core.domain.evidence import Evidence, SourceType
-from document.rag.adapters.retrieval.bm25_local import LocalBm25Index
+from document.rag.components.storage.bm25_local import LocalBm25Index
 from document.rag.application.indexing.service import IndexService
 from document.rag.application.retrieval.helpers import filter_evidences_by_acl
 from document.rag.application.retrieval.hybrid_pipeline import (
@@ -20,7 +20,7 @@ from document.rag.application.retrieval.tag_filter import (
     metadata_matches_tags,
     resolve_scenario_tags,
 )
-from document.rag.adapters.embedding.mock import MockEmbeddingModel
+from document.rag.components.embedding.mock import MockEmbeddingModel
 from document.rag.config import RagPipelineConfig, RetrievalConfig
 
 

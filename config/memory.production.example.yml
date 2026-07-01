@@ -40,12 +40,11 @@ pg_password: ""
 pg_pool_size: 20
 # 或: pg_dsn: postgresql://agents_app:@localhost:5432/agents
 
-# 向量混合检索（生产建议 local_bge）
+# 向量混合检索（embedding 见 config/models.yml roles.embedding）
 enable_session_vector_index: true
 session_vector_dir: data/session_vectors
 session_vector_collection: session_messages
 session_hybrid_search: true
-session_embedding_backend: local_bge
 
 reindex_batch_size: 200
 

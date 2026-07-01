@@ -19,6 +19,9 @@
   pip install aiosqlite chromadb sentence-transformers  # 按需
 
   python document/build_rag_index.py
+  python document/build_rag_index.py --profile faq data/test_docs/*.pdf
+  python document/build_rag_index.py --profile contract contract.docx
+  # 也可: export RAG_PIPELINE_CONFIG=config/rag_pipeline.faq.yml
   # 默认扫描 document/rag/pdf 下 *.pdf；也可显式传 path
   # 强制重建：--force-reindex
 """
@@ -30,23 +33,29 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # 无命令行 path 时使用：扫描该目录下的 PDF 并建库
-DEFAULT_SCAN_PATH = REPO_ROOT / "document" / "rag" / "pdf"
+DEFAULT_SCAN_PATH = REPO_ROOT / "data" / "test_docs"
 DEFAULT_SCAN_GLOB = "*.pdf"
 
 from core.ports.index import IndexProfile, IndexResult
 from core.ports.ingest import IngestResult, IngestStatus
-from document.rag.config import RagPipelineConfig, compute_index_config_hash, load_rag_pipeline_config
-from document.rag.application.cleaning.pipeline import apply_ingest_cleaning
-from document.rag.application.metadata.pipeline import apply_metadata_enrichment
+from document.rag.config import (
+    RagPipelineConfig,
+    compute_index_config_hash,
+    detect_rag_profile_for_path,
+    load_rag_pipeline_config,
+    resolve_rag_pipeline_config_path,
+)
+from document.rag.application.cleaning_pipeline import apply_ingest_cleaning
+from document.rag.application.metadata_pipeline import apply_metadata_enrichment
 from document.rag.application.retrieval.tag_filter import merge_tags_into_metadata
-from document.rag.application.ingest.factory import detect_format
+from document.rag.application.ingest_factory import detect_format
 from document.rag.application.indexing.index_manifest import (
     IndexManifest,
     doc_id_from_file_md5,
@@ -71,11 +80,21 @@ log = logging.getLogger("build_rag_index")
 # ---------------------------------------------------------------------------
 
 
-def step1_load_config(config_dir: str) -> RagPipelineConfig:
-    """[1/6] 加载 rag_pipeline.yml。"""
-    cfg = load_offline_config(config_dir)
+def step1_load_config(
+    config_dir: str,
+    *,
+    config_path: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> RagPipelineConfig:
+    """[1/6] 加载 rag_pipeline*.yml（profile / RAG_PIPELINE_CONFIG / 默认）。"""
+    resolved = config_path or resolve_rag_pipeline_config_path(
+        config_dir=config_dir,
+        profile=profile,
+    )
+    cfg = load_offline_config(config_dir, config_path=resolved)
     log.info(
-        "[1/6] config  collection=%s  ingest.mode=%s  cleaning=%s  metadata=%s  chunk=%s/%s strategy=%s",
+        "[1/6] config  path=%s  collection=%s  ingest.mode=%s  cleaning=%s  metadata=%s  chunk=%s/%s strategy=%s",
+        resolved,
         cfg.collection_name,
         cfg.ingest.mode,
         cfg.ingest.enable_cleaning,
@@ -213,6 +232,38 @@ class BuildReport:
     errors: List[str] = field(default_factory=list)
 
 
+async def purge_superseded_same_filename(
+    index_service: Any,
+    manifest: IndexManifest,
+    tenant_id: str,
+    file_path: Path,
+    file_md5: str,
+) -> int:
+    """同文件名、不同 MD5 时删除旧 doc 向量，避免孤儿 chunk。"""
+    removed = 0
+    tenants = manifest._data.get("tenants", {}).get(tenant_id, {})
+    target_name = file_path.name
+    for old_md5, entry in list(tenants.items()):
+        if old_md5 == file_md5:
+            continue
+        old_source = entry.get("source_path") or ""
+        if Path(old_source).name != target_name:
+            continue
+        old_doc_id = entry.get("doc_id")
+        if not old_doc_id:
+            continue
+        if await index_service.delete_document(old_doc_id, tenant_id):
+            removed += 1
+        manifest.remove(tenant_id, old_md5)
+        log.info(
+            "Purged superseded doc_id=%s (md5=%s) for filename %s",
+            old_doc_id,
+            old_md5[:12],
+            target_name,
+        )
+    return removed
+
+
 async def build_one_document(
     file_path: Path,
     doc_id: str,
@@ -228,13 +279,15 @@ async def build_one_document(
     skip_indexed: bool = True,
     force_reindex: bool = False,
     extra_tags: Optional[List[str]] = None,
+    config_path: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> BuildReport:
     """
     单文件离线建库 — 六步顺序执行（本函数即主流程入口）。
     默认按文件 MD5 跳过已索引（见 data_dir/indexed_by_md5.json）。
     """
     if cfg is None:
-        cfg = step1_load_config(config_dir)
+        cfg = step1_load_config(config_dir, config_path=config_path, profile=profile)
 
     try:
         file_md5 = file_md5_hex(file_path)
@@ -306,6 +359,9 @@ async def build_one_document(
             config_dir=config_dir,
             index_profile=index_profile,
         )
+    await purge_superseded_same_filename(
+        index_service, manifest, tenant_id, file_path, file_md5
+    )
     if force_reindex:
         deleted = await index_service.delete_document(doc_id, tenant_id)
         if deleted:
@@ -379,8 +435,10 @@ async def run_build(
     skip_indexed: bool = True,
     force_reindex: bool = False,
     extra_tags: Optional[List[str]] = None,
+    profile: Optional[str] = None,
+    config_path: Optional[str] = None,
 ) -> int:
-    cfg = step1_load_config(config_dir)
+    cfg = step1_load_config(config_dir, config_path=config_path, profile=profile)
     ingest_port = build_offline_ingest_port(cfg)
     index_profile = _parse_index_profile(index_profile_name)
     index_service, chroma_dir = create_offline_index_service(
@@ -416,6 +474,8 @@ async def run_build(
             skip_indexed=skip_indexed,
             force_reindex=force_reindex,
             extra_tags=extra_tags,
+            profile=profile,
+            config_path=config_path,
         )
         if report.skipped:
             skipped += 1
@@ -472,6 +532,12 @@ def main() -> None:
     parser.add_argument(
         "--config-dir",
         default=str(REPO_ROOT / "config"),
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        choices=["faq", "contract"],
+        help="建库 profile，加载 config/rag_pipeline.{profile}.yml",
     )
     parser.add_argument(
         "--index-profile",
@@ -538,6 +604,7 @@ def main() -> None:
                 skip_indexed=args.skip_indexed,
                 force_reindex=args.force_reindex,
                 extra_tags=args.extra_tags,
+                profile=args.profile,
             )
         )
     )

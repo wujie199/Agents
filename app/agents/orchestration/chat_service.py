@@ -170,7 +170,7 @@ async def _stream_direct_token_turn(
     cfg = handle.chat_cfg
     use_rag = cfg.enable_rag if enable_rag is None else enable_rag
 
-    messages, ev_count, rag_empty, _mem_hash, evidences_summary = await build_turn_messages(
+    messages, ev_count, rag_empty, _mem_hash, evidences_summary, memory_summary = await build_turn_messages(
         ctx,
         message,
         cfg,
@@ -181,6 +181,7 @@ async def _stream_direct_token_turn(
         "evidence_count": ev_count,
         "rag_empty": rag_empty,
         "evidences_summary": evidences_summary or [],
+        "memory_summary": memory_summary or {},
         "stream": "token",
     }
     yield json.dumps(meta, ensure_ascii=False)
@@ -272,6 +273,7 @@ async def stream_chat_turn_events(
             "evidence_count": result.evidence_count,
             "rag_empty": result.rag_empty,
             "evidences_summary": result.evidences_summary or [],
+            "memory_summary": result.memory_summary or {},
             "history_turns": result.history_turns,
             "stream": "batch",
         }

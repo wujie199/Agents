@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 from typing import Any, AsyncIterator, List, Tuple
+import logging
 
 from app.agents.roles.react_loop import _extract_llm_text
+
+_think_dbg = logging.getLogger("thinking_debug")
 
 
 def extract_stream_delta(chunk: Any) -> str:
@@ -54,7 +57,12 @@ def extract_stream_chunk_reasoning(chunk: Any) -> Tuple[str, str]:
     """
     # provider 层 astream 直接 yield 元组
     if isinstance(chunk, tuple) and len(chunk) == 2:
-        return (str(chunk[0] or ""), str(chunk[1] or ""))
+        _content, _reasoning = str(chunk[0] or ""), str(chunk[1] or "")
+        if _reasoning:
+            _think_dbg.debug(
+                "[THINK-3 extract] tuple reasoning=%r", _reasoning[:50],
+            )
+        return (_content, _reasoning)
 
     if chunk is None:
         return ("", "")

@@ -124,7 +124,7 @@ def _build_memory(
             vector_port = ChromaVectorAdapter(
                 persist_directory=f"{data_path}/chroma_cli"
             )
-            _, index_port, _, _, _ = build_rag_stack(
+            stack = build_rag_stack(
                 models=models,
                 vector_port=vector_port,
                 cache_port=cache,
@@ -134,6 +134,7 @@ def _build_memory(
                 privacy_port=privacy,
                 data_dir=data_path,
             )
+            index_port = stack.index_port
         except Exception as exc:
             log.warning("RAG index stack unavailable for CLI: %s", exc)
 

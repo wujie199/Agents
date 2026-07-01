@@ -1,4 +1,4 @@
-# RAG 生产配置示例
+# RAG 生产配置示例（模型路径见 config/models.yml + 环境变量）
 # 用法: export RAG_PIPELINE_CONFIG=config/rag_pipeline.production.example.yml
 
 collection_name: agent
@@ -15,16 +15,6 @@ cache_ttl_seconds: 900
 model_version: bge-small-zh-v1.5-local
 embedding_batch_size: 32
 
-embedding:
-  backend: local_bge
-  # 生产通过环境变量覆盖: RAG_EMBEDDING_MODEL_PATH
-  model_path: /opt/models/embedding/bge-small-zh-v1.5
-  normalize: true
-
-rerank:
-  backend: local_bge
-  model_path: /opt/models/rerank/bge-reranker-base
-
 metadata:
   enabled: true
   backend: rule_keyword
@@ -32,7 +22,6 @@ metadata:
 ingest:
   mode: ocr_only
   routing: simplified
-  ocr_model_root: /opt/models/ocr
   ocr_device: cpu
 
 retrieval:

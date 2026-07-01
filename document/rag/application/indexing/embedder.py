@@ -6,6 +6,8 @@ from datetime import datetime
 import logging
 
 from core.ports.chunker import Chunk
+from core.ports.rag.embedding import EmbeddingPort
+from core.ports.storage.cache import CachePort
 
 
 class Embedder:
@@ -18,9 +20,9 @@ class Embedder:
     
     def __init__(
         self,
-        embedding_model: Any,
+        embedding_model: EmbeddingPort,
         batch_size: int = 32,
-        cache_port: Optional[Any] = None,
+        cache_port: Optional[CachePort] = None,
         model_version: str = "v1",
         enable_cache: bool = True,
     ):
@@ -91,7 +93,7 @@ class Embedder:
                     if cached and "embedding" in cached:
                         embeddings.append(cached["embedding"])
                         continue
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
                     self._logger.warning(f"Cache get failed: {e}")
                 
                 uncached_indices.append(idx)
@@ -117,7 +119,7 @@ class Embedder:
                             {"embedding": new_embeddings[uncached_indices.index(idx)]},
                             ttl_seconds=86400 * 30,
                         )
-                    except Exception as e:
+                    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
                         self._logger.warning(f"Cache set failed: {e}")
         
         return embeddings
@@ -130,7 +132,7 @@ class Embedder:
                 return self._model.embed(texts)
             else:
                 raise RuntimeError("Model has no embed method")
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError, ConnectionError) as e:
             self._logger.error(f"Embedding failed: {e}")
             raise
     

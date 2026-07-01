@@ -35,7 +35,7 @@ def test_default_memory_yml_enables_full_stack(monkeypatch):
     assert cfg.get("enable_session_vector_index") is True
     assert cfg.get("enable_cold_archive") is True
     assert cfg.get("skill_auto_extract_draft") is True
-    assert cfg.get("session_embedding_backend") == "mock"
+    assert "session_embedding_backend" not in cfg
 
 
 def test_seed_l4_profile_if_missing(tmp_path):
