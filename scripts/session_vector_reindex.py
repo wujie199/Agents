@@ -2,8 +2,7 @@
 """会话向量 reindex 快捷脚本。
 
 示例:
-  MEMORY_CONFIG=config/memory.dev-vector.example.yml \\
-    python scripts/session_vector_reindex.py --tenant tenant1 --user user1
+  MEMORY_PROFILE=vector python scripts/session_vector_reindex.py --tenant tenant1 --user user1
 
   python scripts/session_vector_reindex.py --tenant tenant1 --session chat1 --batch-size 100
 """
@@ -30,7 +29,7 @@ async def _run(args: argparse.Namespace) -> int:
     if not cfg.get("enable_session_vector_index"):
         print(
             "错误: enable_session_vector_index=false。"
-            "请设置 MEMORY_CONFIG=config/memory.dev-vector.example.yml",
+            "请设置 MEMORY_PROFILE=vector（或 config/memory.yml 中 enable_session_vector_index: true）",
             file=sys.stderr,
         )
         return 1

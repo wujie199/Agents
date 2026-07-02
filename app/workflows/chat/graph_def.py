@@ -9,6 +9,7 @@ Path B: enable_memory_tools=true, L1/L2/L3/L4 记忆工具
 from __future__ import annotations
 
 import time
+import os
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -18,8 +19,13 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage, add_mess
 
 from core.composition.run_context import RunContext
 
-from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
+from app.agents.orchestration.chat_config import (
+    ChatAgentConfig,
+    load_chat_config,
+    load_observability_config,
+)
 from app.agents.orchestration.chat_nodes import build_turn_messages, persist_user_and_assistant
+from app.agents.memory.l0_context import maybe_compress_turn_context
 from app.agents.prompts.text_sanitize import strip_model_reasoning
 from app.agents.roles.retrieval_router import should_use_direct_llm_for_intent
 from app.agents.roles.react_turn import (
@@ -28,13 +34,17 @@ from app.agents.roles.react_turn import (
     last_ai_text,
     make_react_agent,
 )
-from app.runtime.adapters.langgraph.model_bridge import filter_messages_for_llm
+from app.runtime.adapters.langgraph.model_bridge import filter_messages_for_llm, _message_to_dict
+from app.agents.observability.react_events import stream_react_agent_with_observability
 from app.agents.middleware.compose import wrap_node, compose_middlewares
+from app.agents.middleware.request_context import RequestContextMiddleware
 from app.agents.middleware.tracing import TracingMiddleware
 from app.agents.middleware.timing import TimingMiddleware
+from app.agents.middleware.metrics import MetricsMiddleware
 from app.agents.middleware.logging import LoggingMiddleware
 from app.agents.middleware.policy import PolicyMiddleware
 from app.agents.middleware.privacy import PrivacyMiddleware
+from app.agents.middleware.error_classifier import ErrorClassifierMiddleware
 from app.agents.middleware.audit import AuditMiddleware
 
 
@@ -173,16 +183,34 @@ def build_chat_langgraph_workflow(
 ) -> StateGraph:
     """构建未编译的 StateGraph（外层：prepare → agent → persist）。"""
     cfg = chat_cfg or load_chat_config()
+    obs_cfg = load_observability_config()
     react_agent = make_react_agent(ctx, cfg)
 
     # ── 构建 Middleware 链 ──
+    node_thresholds = {
+        k: float(v) for k, v in obs_cfg.slow_threshold_ms.items()
+    }
+    # Audit 放在 Tracing 之前，使 on_exit 时 Tracing 先写入 duration_ms 再审计落盘
     middlewares = compose_middlewares(
+        RequestContextMiddleware(trace_header=obs_cfg.trace_header),
+        AuditMiddleware(
+            persist=obs_cfg.audit_persist,
+            audit_log_dir=obs_cfg.audit_log_dir,
+        ),
         TracingMiddleware(),
-        TimingMiddleware(slow_threshold_ms=3000),
-        PolicyMiddleware(),
+        TimingMiddleware(
+            slow_threshold_ms=3000,
+            node_thresholds=node_thresholds,
+        ),
+        MetricsMiddleware(node_thresholds=node_thresholds),
+        PolicyMiddleware(
+            max_qps_per_tenant=obs_cfg.max_qps_per_tenant,
+            rate_limit_backend=obs_cfg.rate_limit_backend,
+            redis_url=os.environ.get("REDIS_URL"),
+        ),
         LoggingMiddleware(),
         PrivacyMiddleware(),
-        AuditMiddleware(),
+        ErrorClassifierMiddleware(),
     )
 
     async def _agent_node(
@@ -210,16 +238,13 @@ def build_chat_langgraph_workflow(
 
                 out_messages = [*out_messages, AIMessage(content=assistant_text)]
         else:
-            # 使用 astream 以触发 on_chat_model_stream 事件，
-            # 使 reasoning_content 能通过流式事件传递到前端
-            out_messages = list(_agent_messages)
-            async for _step in react_agent.astream(
-                {"messages": _agent_messages},
+            # astream_events(v2) 记录 tool/LLM 指标，并保留 reasoning 流式能力
+            out_messages = await stream_react_agent_with_observability(
+                react_agent,
+                _agent_messages,
                 config,
-            ):
-                _step_msgs = _step.get("messages") or []
-                if _step_msgs:
-                    out_messages = _step_msgs
+                _agent_ctx,
+            )
             assistant_text = strip_model_reasoning(last_ai_text(out_messages))
         perf_mark(
             _agent_ctx,
@@ -229,6 +254,18 @@ def build_chat_langgraph_workflow(
             direct_llm=use_direct,
             intent=intent,
         )
+
+        mem_hash = state.get("memory_snapshot_hash") or ""
+        dict_out = [
+            d for d in (_message_to_dict(m) for m in out_messages) if d
+        ]
+        await maybe_compress_turn_context(
+            _agent_ctx,
+            dict_out,
+            chat_cfg=cfg,
+            memory_snapshot_hash=mem_hash,
+        )
+
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),

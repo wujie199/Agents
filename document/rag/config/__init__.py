@@ -9,11 +9,16 @@ from document.rag.config.metadata import MetadataConfig
 from document.rag.config.pipeline import (
     RagPipelineConfig,
     RAG_PIPELINE_PROFILES,
-    warn_local_model_paths,
     compute_index_config_hash,
     detect_rag_profile_for_path,
     load_rag_pipeline_config,
     resolve_rag_pipeline_config_path,
+)
+from document.rag.config.rag_yaml import (
+    RAG_PROFILES,
+    resolve_rag_config_path,
+    load_rag_eval_section,
+    load_rag_scenarios_section,
 )
 
 __all__ = [
@@ -24,10 +29,13 @@ __all__ = [
     "RerankConfig",
     "MetadataConfig",
     "RagPipelineConfig",
+    "RAG_PROFILES",
     "RAG_PIPELINE_PROFILES",
-    "warn_local_model_paths",
     "compute_index_config_hash",
     "detect_rag_profile_for_path",
     "load_rag_pipeline_config",
+    "resolve_rag_config_path",
     "resolve_rag_pipeline_config_path",
+    "load_rag_eval_section",
+    "load_rag_scenarios_section",
 ]

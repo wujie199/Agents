@@ -3,11 +3,32 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Dict, Tuple
 
 import yaml
+
+
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    enabled: bool = True
+    trace_header: str = "X-Request-ID"
+    slow_threshold_ms: Dict[str, int] = field(
+        default_factory=lambda: {
+            "prepare": 2000,
+            "agent": 8000,
+            "persist": 500,
+        }
+    )
+    rate_limit_backend: str = "memory"
+    max_qps_per_tenant: int = 100
+    audit_persist: bool = False
+    audit_log_dir: str = "data/audit"
+
+
+_DEFAULT_OBS = ObservabilityConfig()
 
 
 @dataclass(frozen=True)
@@ -97,6 +118,11 @@ class ChatAgentConfig:
     # 时间衰减
     time_decay: bool = True
     time_decay_half_life_days: float = 90.0
+    # L0 上下文压缩（Hermes Phase A）
+    l0_context_compress_enabled: bool = True
+    context_compress_threshold: float = 0.50
+    compress_target_ratio: float = 0.20
+    context_window_tokens: int = 128000
 
 
 _DEFAULT = ChatAgentConfig()
@@ -118,6 +144,38 @@ def _merge_chat_profile(chat: dict[str, Any], profile: str | None) -> dict[str, 
         if isinstance(overlay, dict):
             merged.update(overlay)
     return merged
+
+
+def load_observability_config(
+    config_dir: str | Path = "config",
+    *,
+    profile: str | None = None,
+) -> ObservabilityConfig:
+    path = Path(config_dir) / "chat.yml"
+    if not path.is_file():
+        return _DEFAULT_OBS
+    with path.open(encoding="utf-8") as f:
+        raw: dict[str, Any] = yaml.safe_load(f) or {}
+    obs = raw.get("observability") or {}
+    thresholds = dict(_DEFAULT_OBS.slow_threshold_ms)
+    raw_thresholds = obs.get("slow_threshold_ms")
+    if isinstance(raw_thresholds, dict):
+        for key, value in raw_thresholds.items():
+            thresholds[str(key)] = int(value)
+    backend = str(obs.get("rate_limit_backend", _DEFAULT_OBS.rate_limit_backend))
+    if obs.get("rate_limit_backend") == "redis" or os.environ.get("REDIS_URL"):
+        backend = "redis"
+    return ObservabilityConfig(
+        enabled=bool(obs.get("enabled", _DEFAULT_OBS.enabled)),
+        trace_header=str(obs.get("trace_header", _DEFAULT_OBS.trace_header)),
+        slow_threshold_ms=thresholds,
+        rate_limit_backend=backend,
+        max_qps_per_tenant=int(
+            obs.get("max_qps_per_tenant", _DEFAULT_OBS.max_qps_per_tenant)
+        ),
+        audit_persist=bool(obs.get("audit_persist", _DEFAULT_OBS.audit_persist)),
+        audit_log_dir=str(obs.get("audit_log_dir", _DEFAULT_OBS.audit_log_dir)),
+    )
 
 
 def load_chat_config(
@@ -329,5 +387,20 @@ def load_chat_config(
         ),
         time_decay_half_life_days=float(
             chat.get("time_decay_half_life_days", _DEFAULT.time_decay_half_life_days)
+        ),
+        l0_context_compress_enabled=bool(
+            chat.get("l0_context_compress_enabled", _DEFAULT.l0_context_compress_enabled)
+        ),
+        context_compress_threshold=float(
+            chat.get(
+                "context_compress_threshold",
+                _DEFAULT.context_compress_threshold,
+            )
+        ),
+        compress_target_ratio=float(
+            chat.get("compress_target_ratio", _DEFAULT.compress_target_ratio)
+        ),
+        context_window_tokens=int(
+            chat.get("context_window_tokens", _DEFAULT.context_window_tokens)
         ),
     )

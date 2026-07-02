@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Set
 
+import time
+
 from core.composition.run_context import RunContext
+from core.ports.observability import Layer
+
+from app.agents.observability.graph_metrics import record_tool_call
+from app.agents.observability.instrument import span_ctx
 
 _MEMORY_TOOLS = frozenset(
     {
@@ -13,6 +19,7 @@ _MEMORY_TOOLS = frozenset(
         "skill_search",
         "run_skill",
         "remember_user_fact",
+        "memory",
     }
 )
 
@@ -71,6 +78,30 @@ async def invoke_tool(
     tool_name: str,
     args: Dict[str, Any],
 ) -> Any:
+    span_attrs: Dict[str, Any] = {"tool_name": tool_name}
+    async with span_ctx(ctx, "agent.invoke_tool", Layer.AGENT, span_attrs):
+        t0 = time.perf_counter()
+        success = True
+        try:
+            return await _invoke_tool_impl(ctx, tool_name, args)
+        except Exception:
+            success = False
+            raise
+        finally:
+            span_attrs["success"] = success
+            record_tool_call(
+                ctx,
+                (time.perf_counter() - t0) * 1000,
+                tool_name=tool_name,
+                success=success,
+            )
+
+
+async def _invoke_tool_impl(
+    ctx: RunContext,
+    tool_name: str,
+    args: Dict[str, Any],
+) -> Any:
     if tool_name in _MEMORY_TOOLS:
         memory = ctx.require_memory()
         if tool_name == "session_search":
@@ -79,6 +110,10 @@ async def invoke_tool(
                 ctx.request,
                 limit=int(args.get("limit", 5)),
                 scope=args.get("scope", "session"),
+                mode=args.get("mode"),
+                sort=args.get("sort", "newest"),
+                around_message_id=str(args.get("around_message_id") or ""),
+                session_link=str(args.get("session_link") or ""),
             )
         if tool_name == "session_search_detail":
             detail = await memory.session_search_detail(
@@ -133,6 +168,19 @@ async def invoke_tool(
                 require_hitl=require_hitl,
             )
             return {"ok": True, "key": args["key"], "pending": require_hitl}
+        if tool_name == "memory":
+            invoke = getattr(memory, "invoke_memory_tool", None)
+            if invoke is None:
+                return {"success": False, "error": "L1 memory tool not available."}
+            ops = args.get("operations")
+            return invoke(
+                ctx.request,
+                action=str(args.get("action", "")),
+                target=str(args.get("target", "memory")),
+                content=args.get("content"),
+                old_text=args.get("old_text"),
+                operations=ops if isinstance(ops, list) else None,
+            )
 
     if tool_name.startswith("mcp."):
         parts = tool_name.split(".", 2)

@@ -6,7 +6,8 @@
 python app/chat_repl.py --tenant tenant1 --user user1 --session chat1
 ```
 
-- **记忆**：`config/memory.yml` 默认开启向量(mock)、冷归档、L4 file、skill draft；**无需** `MEMORY_CONFIG`
+- **记忆**：`config/memory.yml` 分段配置（l1/l2/archive/vector/skills/l4/cold_archive）；dev 默认全开，**无需** `MEMORY_CONFIG`
+- 联调 profile：`MEMORY_PROFILE=vector|cold|skills|l4_http`
 - **启动 bootstrap**：自动创建目录、L4 seed、ensure_session、当前会话向量 reindex
 - **Chat dev profile**（`config/chat.yml` → `profiles.dev`）：`remember_require_hitl: false`；退出 REPL 时 `auto_confirm_pending_on_exit: true` 自动确认剩余 pending
 - **RAG 租户**：见 [TENANT.md](./TENANT.md)
@@ -83,12 +84,70 @@ Context 预检索：`session_search_prefetch_scope`（auto/session/user）、`sk
 
 | 端点 | 说明 |
 |------|------|
-| `GET /metrics` | Prometheus 文本（`memory.*` 计数器） |
+| `GET /metrics` | Prometheus 文本（`memory.*`、`graph.*`、`agent.*` 计数器） |
 | `GET /v1/metrics/memory` | JSON 指标摘要（count/sum/avg） |
 | `POST /v1/memory/status` | 含 `metrics` 字段 |
 | REPL `/metrics` | 同上 JSON + Prometheus 片段 |
 
-指标名：`memory.*`、`cache.rag.*`、`cache.redis.*`（含 circuit breaker / fallback）
+### 指标
+
+| 指标 | 说明 |
+|------|------|
+| `graph.node.duration_ms` | LangGraph 节点耗时（tags: `node`, `tenant_id`, `error`, `slow`） |
+| `graph.node.errors_total` | 节点异常计数（tags: `node`, `error_type`, `tenant_id`） |
+| `agent.tool.*` / `agent.llm.*` | ReAct tool/LLM 调用 |
+| `memory.*` / `cache.rag.*` / `cache.redis.*` | 记忆与缓存 |
+
+`error_type` 取值：`policy_denied`、`llm_timeout`、`tool_error`、`memory_error`、`unknown`。
+
+### Trace 流
+
+```
+HTTP RequestContext → Middleware 链 → LangGraph 节点
+  RequestContextMiddleware  解析 trace_id / tenant / user / session
+  TracingMiddleware         graph.{node} span（ObservabilityPort / OTel）
+  TimingMiddleware          慢节点标记
+  MetricsMiddleware         graph.node.duration_ms
+  PolicyMiddleware          租户 QPS（内存或 Redis 滑动窗口）
+  PrivacyMiddleware         PII 检测
+  ErrorClassifierMiddleware graph.node.errors_total（on error）
+  AuditMiddleware           hash 审计 + 可选 NDJSON 持久化
+ReAct agent 节点：astream_events(v2) → agent.tool.* / agent.llm.*
+```
+
+LangGraph 节点经 Middleware 链注入 `trace_id` 与 span 属性（`tenant_id` / `user_id` / `session_id` / `node`）。ReAct agent 节点通过 `astream_events(v2)` 记录 tool/LLM 耗时，并写入 `run_ctx.extra.agent_events` 供 SSE meta 使用。
+
+### 配置（config/chat.yml → observability）
+
+```yaml
+observability:
+  enabled: true
+  trace_header: X-Request-ID
+  slow_threshold_ms:
+    prepare: 2000
+    agent: 8000
+    persist: 500
+  rate_limit_backend: memory   # memory | redis
+  max_qps_per_tenant: 100
+  audit_persist: false         # true → data/audit/audit_YYYY-MM-DD.jsonl
+  audit_log_dir: data/audit
+```
+
+- **Redis 限流**：设置 `observability.rate_limit_backend: redis` 或环境变量 `REDIS_URL` 时，PolicyMiddleware 使用 Redis 1 秒滑动窗口；Redis 不可用时 **fail-open** 回退进程内限流。
+- **审计持久化**：`audit_persist: true` 时追加 NDJSON，字段含 `trace_id`、`tenant_id`、`user_id`、`session_id`、`node`、`duration_ms`、`error`、`content_hashes`、`ts`。
+
+### OpenTelemetry（可选）
+
+未安装 OTel 包或未设置 endpoint 时自动回退内存 adapter，不影响服务启动。
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+export OTEL_SERVICE_NAME=agents-chat          # 默认 agents-chat
+export OTEL_TRACES_SAMPLER_ARG=0.1            # head sampling，1.0=全采样
+pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+```
+
+`production_factory` / `chat_server` 在检测到 `OTEL_EXPORTER_OTLP_ENDPOINT` 时使用 `OtelObservabilityAdapter`，否则 `ObservabilityPortAdapter`。
 
 ## 6. 健康检查
 

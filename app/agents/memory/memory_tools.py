@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List
+from typing import Any, List, Optional
 
 from langchain_core.tools import StructuredTool
 
@@ -26,16 +26,33 @@ def build_memory_tools(
         query: str,
         limit: int = 5,
         scope: str = "session",
+        mode: str = "discovery",
+        sort: str = "newest",
+        around_message_id: str = "",
+        session_link: str = "",
     ) -> str:
-        """搜索会话历史。scope=session 本会话；scope=user 跨会话。"""
+        """搜索会话历史。mode=discovery|scroll|read|browse；scope 仅 legacy 摘要路径使用。"""
         memory = ctx.require_memory()
         use_scope = "user" if str(scope).lower() == "user" else "session"
-        text = await memory.session_search(
-            query,
-            ctx.request,
-            limit=max(1, min(int(limit), 20)),
-            scope=use_scope,  # type: ignore[arg-type]
-        )
+        use_mode = (mode or "discovery").strip().lower()
+        if use_mode in ("discovery", "scroll", "read", "browse"):
+            text = await memory.session_search(
+                query,
+                ctx.request,
+                limit=max(1, min(int(limit), 20)),
+                scope=use_scope,  # type: ignore[arg-type]
+                mode=use_mode,
+                sort=sort,
+                around_message_id=around_message_id,
+                session_link=session_link,
+            )
+        else:
+            text = await memory.session_search(
+                query,
+                ctx.request,
+                limit=max(1, min(int(limit), 20)),
+                scope=use_scope,  # type: ignore[arg-type]
+            )
         record_session_search(ctx, hit=bool(text and text.strip()))
         return text or "（未找到相关历史）"
 
@@ -46,26 +63,79 @@ def build_memory_tools(
         if not val:
             return "错误：value 不能为空"
         memory = ctx.require_memory()
-        await memory.update_prompt_memory(
-            ctx.request,
-            MemoryDelta(key=safe_key, value=val, source="user"),
-            require_hitl=chat_cfg.remember_require_hitl,
-        )
         if chat_cfg.remember_require_hitl:
+            await memory.update_prompt_memory(
+                ctx.request,
+                MemoryDelta(key=safe_key, value=val, source="user"),
+                require_hitl=True,
+            )
             return (
                 f"已加入待确认记忆：{safe_key}={val}。"
                 "输入 /pending 查看，/confirm 立即写入 L1；"
                 "或会话结束时自动 finalize。"
             )
+        invoke = getattr(memory, "invoke_memory_tool", None)
+        if invoke is not None:
+            result = invoke(
+                ctx.request,
+                action="add",
+                target="user",
+                content=f"{safe_key}: {val}",
+            )
+            if not result.get("success"):
+                return json.dumps(result, ensure_ascii=False)
+            return f"已记住：{safe_key}={val}"
+        await memory.update_prompt_memory(
+            ctx.request,
+            MemoryDelta(key=safe_key, value=val, source="user"),
+            require_hitl=False,
+        )
         return f"已记住：{safe_key}={val}"
+
+    async def memory(
+        action: str,
+        target: str = "memory",
+        content: Optional[str] = None,
+        old_text: Optional[str] = None,
+        operations: Optional[str] = None,
+    ) -> str:
+        """Hermes L1 记忆：add/replace/remove 或 operations JSON 批量写入。"""
+        memory = ctx.require_memory()
+        invoke = getattr(memory, "invoke_memory_tool", None)
+        if invoke is None:
+            return json.dumps(
+                {"success": False, "error": "L1 memory tool not available."},
+                ensure_ascii=False,
+            )
+        ops: Optional[list] = None
+        if operations:
+            try:
+                parsed = json.loads(operations)
+                if isinstance(parsed, list):
+                    ops = parsed
+            except json.JSONDecodeError:
+                return json.dumps(
+                    {"success": False, "error": "operations must be JSON array."},
+                    ensure_ascii=False,
+                )
+        result = invoke(
+            ctx.request,
+            action=action,
+            target=target,
+            content=content,
+            old_text=old_text,
+            operations=ops,
+        )
+        return json.dumps(result, ensure_ascii=False)
 
     tools: List[StructuredTool] = [
         StructuredTool.from_function(
             coroutine=session_search,
             name="session_search",
             description=(
-                "搜索历史对话片段。scope=session 查本会话；scope=user 查该用户所有会话。"
-                "回忆类问题、跨会话追溯时使用。"
+                "搜索历史对话片段。mode=discovery|scroll|read|browse（零 LLM，返回 DB 原文）。"
+                "discovery 跨会话 FTS 检索；scroll 需 around_message_id；"
+                "read 需 @session:<id> 链接；browse 列出近期会话摘要。"
             ),
         ),
         StructuredTool.from_function(
@@ -74,6 +144,15 @@ def build_memory_tools(
             description=(
                 "记住用户的长期偏好或事实到 USER 记忆。"
                 "当用户说「记住」「以后都」「叫我…」时使用。"
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=memory,
+            name="memory",
+            description=(
+                "Hermes L1 持久记忆：action=add|replace|remove，target=memory|user。"
+                "replace/remove 用 old_text 子串定位；operations 传 JSON 数组可批量原子写入。"
+                "会话内 system prompt 为冻结快照，工具返回反映实时磁盘状态。"
             ),
         ),
     ]

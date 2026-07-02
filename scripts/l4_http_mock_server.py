@@ -5,7 +5,7 @@
   python scripts/l4_http_mock_server.py --port 8765
 
 配置:
-  MEMORY_CONFIG=config/memory.dev-l4-http.example.yml
+  MEMORY_PROFILE=l4_http
   external_profiles_http_url: http://127.0.0.1:8765
 """
 from __future__ import annotations

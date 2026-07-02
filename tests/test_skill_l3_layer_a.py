@@ -175,3 +175,27 @@ async def test_list_skill_runs_and_purge_tenant(tmp_path):
     assert purged["drafts_removed"] >= 1
     assert purged["skill_runs_deleted"] == 1
     assert await sm.list_skill_runs("tenant1") == []
+
+
+@pytest.mark.asyncio
+async def test_on_session_end_auto_extract(tmp_path):
+    db = AsyncSQLiteRelationalAdapter(
+        db_path=str(tmp_path / "archive.db"), pool_size=2
+    )
+    skills = SimpleSkillAdapter(skills_dir="skills/published")
+    drafts_dir = tmp_path / "drafts"
+    sm = SkillMemoryAdapter(
+        skills=skills,
+        meta_dir=str(tmp_path / "meta"),
+        drafts_dir=str(drafts_dir),
+        archive_db=db,
+        auto_extract_draft=True,
+        auto_extract_min_steps=1,
+    )
+    tools = ToolPortAdapter(config_path="config/tools.yml")
+    ctx = RunContext(request=_ctx(), tools=tools)
+    await sm.run_and_finalize("example", {"message": "audit"}, ctx, _ctx())
+    end = await sm.on_session_end(_ctx())
+    assert end["enabled"] is True
+    assert end["runs_scanned"] >= 1
+    assert any(d.get("skill_id") == "example" for d in end.get("drafts", []))

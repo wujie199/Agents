@@ -81,3 +81,11 @@ def test_faq_chunker_single_question_per_chunk():
     chunks = chunker.chunk(OCR_SAMPLE, "doc_test")
     for chunk in chunks:
         assert chunk.content.lstrip()[0].isdigit()
+
+
+def test_sanitize_faq_content_removes_dash_question_mark():
+    from document.rag.application.indexing.faq_chunker import format_faq_block, sanitize_faq_content
+
+    item = format_faq_block("4 APP无法连接机器人怎么办 -确认手机和机器人连接同一WiFi")
+    assert "-？" not in item.content
+    assert sanitize_faq_content("1. 问题\n-？\n答案") == "1. 问题\n答案"

@@ -67,18 +67,21 @@ python scripts/l4_profile_sync_cron.py --tenant tenant1 --direction push
 - `resolve_entity(mention)` — 实体别名解析
 - `fetch_profile_facts()` — 读取当前用户 L4 facts（不触发 L1 合并）
 
-## 配置（`config/memory.yml`）
+## 配置（`config/memory.yml` → `l4` 段）
+
+HTTP 联调 mock：`MEMORY_PROFILE=l4_http`（见 `scripts/l4_http_mock_server.py`）。
 
 ```yaml
-external_profiles_dir: data/external_profiles
-external_profiles_backend: file   # file | http | noop
-external_profiles_http_url: null  # backend=http 时必填
-external_profiles_http_timeout: 10
-external_profile_cache_ttl: 300   # 秒，0=禁用缓存
-external_profile_cache_backend: redis  # redis | memory（测试用 memory）
-external_merge_on_finalize: true
-purge_delete_external_audit: true
-purge_tenant_l4_strip_user_keys: true
+l4:
+  external_profiles_dir: data/external_profiles
+  external_profiles_backend: file   # file | http | noop
+  external_profiles_http_url: null  # backend=http 时必填
+  external_profiles_http_timeout: 10
+  external_profile_cache_ttl: 300
+  external_profile_cache_backend: redis
+  external_merge_on_finalize: true
+  purge_delete_external_audit: true
+  purge_tenant_l4_strip_user_keys: true
 ```
 
 ## 适配器

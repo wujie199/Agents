@@ -1,8 +1,2 @@
-
-wordPath: word/
-
-jsonPath_read: json/read.json
-
-jsonPath_save: json/save.json
-
-json_router: json/router.json
+# 可选工具注册表（ToolPortAdapter）；内置工具在代码中自动注册
+tools: []

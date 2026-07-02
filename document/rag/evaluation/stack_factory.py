@@ -7,8 +7,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
-
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
 from app.agents.context_factory import build_chat_run_context, resolve_rag_tenant_id
@@ -23,20 +21,23 @@ class EvalStackConfig:
     roles: dict[str, Any]
     metrics: dict[str, list[str]]
     output: dict[str, Any]
+    ir: dict[str, Any]
+
+
+from document.rag.config.rag_yaml import load_rag_eval_section
 
 
 def load_eval_config(config_dir: str | Path = "config") -> EvalStackConfig:
-    path = Path(config_dir) / "rag_eval.yml"
-    if not path.is_file():
-        return EvalStackConfig({}, {}, {}, {}, {})
-    with path.open(encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    raw = load_rag_eval_section(config_dir)
+    if not raw:
+        return EvalStackConfig({}, {}, {}, {}, {}, {})
     return EvalStackConfig(
         generation=dict(raw.get("generation") or {}),
         judge=dict(raw.get("judge") or {}),
         roles=dict(raw.get("roles") or {}),
         metrics=dict(raw.get("metrics") or {}),
         output=dict(raw.get("output") or {}),
+        ir=dict(raw.get("ir") or {}),
     )
 
 

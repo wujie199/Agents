@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, List, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -17,7 +18,10 @@ from langchain_core.callbacks import (
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from core.composition.run_context import RunContext
+from core.ports.observability import Layer
 
+from app.agents.observability.graph_metrics import record_llm_call
+from app.agents.observability.instrument import span_ctx
 from app.agents.prompts.llm_stream import stream_llm_text, stream_llm_chunks, extract_stream_chunk_reasoning
 from app.agents.roles.react_loop import _extract_llm_text
 
@@ -147,6 +151,20 @@ def _extract_tool_calls_from_response(response: Any) -> list[dict[str, Any]]:
             msg = choices[0].get("message") or {}
             return _lc_tool_calls(msg.get("tool_calls"))
     return []
+
+
+def _extract_prompt_tokens(response: Any) -> int | None:
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        raw = getattr(usage, "prompt_tokens", None)
+        if raw is not None:
+            return int(raw)
+    if isinstance(response, dict):
+        usage_dict = response.get("usage") or {}
+        raw = usage_dict.get("prompt_tokens")
+        if raw is not None:
+            return int(raw)
+    return None
 
 
 # ── 流式 tool_call 增量处理 ──
@@ -310,6 +328,12 @@ class PortChatModel(BaseChatModel):
 
         text = _extract_llm_text(response)
         tool_calls = _extract_tool_calls_from_response(response)
+
+        usage_tokens = _extract_prompt_tokens(response)
+        if usage_tokens is not None:
+            extra = getattr(self.run_ctx, "extra", None)
+            if isinstance(extra, dict):
+                extra["_last_llm_prompt_tokens"] = usage_tokens
 
         # 提取 reasoning_content（推理模型思考过程）
         additional_kwargs: dict[str, Any] = {}

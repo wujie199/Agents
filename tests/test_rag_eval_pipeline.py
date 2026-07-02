@@ -179,8 +179,9 @@ async def test_generate_answer_uses_prompt_builder():
     )
     captured: dict = {}
 
-    async def _fake_ainvoke(messages):
+    async def _fake_ainvoke(messages, **kwargs):
         captured["messages"] = messages
+        captured["kwargs"] = kwargs
         resp = MagicMock()
         resp.choices = [MagicMock()]
         resp.choices[0].message.content = "OK"
@@ -314,6 +315,7 @@ async def test_run_rag_eval_skip_ragas(tmp_path: Path, sample_jsonl: Path):
     eval_cfg = replace(
         load_eval_config("config"),
         output={"results_dir": str(tmp_path / "results"), "preview_chars": 100},
+        ir={"enabled": True, "ks": [1, 5], "min_overlap_chars": 8},
     )
 
     with patch("document.rag.evaluation.run.build_eval_run_context", return_value=fake_ctx):
@@ -330,6 +332,7 @@ async def test_run_rag_eval_skip_ragas(tmp_path: Path, sample_jsonl: Path):
     assert result["run_id"] == "unit-run"
     assert Path(result["output_dir"]).is_dir()
     assert (Path(result["output_dir"]) / "summary.json").is_file()
+    assert "ir_metrics" in result["summary"]
 
 
 @pytest.mark.skipif(

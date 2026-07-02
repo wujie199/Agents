@@ -94,6 +94,13 @@ class AsyncSQLiteRelationalAdapter:
                 tokenize='unicode61'
             );
 
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
+                content,
+                message_id UNINDEXED,
+                session_id UNINDEXED,
+                tokenize='trigram'
+            );
+
             CREATE TABLE IF NOT EXISTS cold_archive_sessions (
                 archive_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL UNIQUE,
@@ -198,11 +205,71 @@ class AsyncSQLiteRelationalAdapter:
         for stmt in (
             "ALTER TABLE messages ADD COLUMN content_hash TEXT",
             "ALTER TABLE tool_calls ADD COLUMN result_hash TEXT",
+            "ALTER TABLE messages ADD COLUMN source TEXT DEFAULT 'user'",
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE sessions ADD COLUMN title TEXT",
+            "ALTER TABLE sessions ADD COLUMN message_count INTEGER DEFAULT 0",
+            "ALTER TABLE sessions ADD COLUMN source TEXT DEFAULT 'user'",
+            "ALTER TABLE sessions ADD COLUMN end_reason TEXT",
         ):
             try:
                 await conn.execute(stmt)
             except Exception:
                 pass
+        await self._ensure_fts_schema(conn)
+
+    async def _ensure_fts_schema(self, conn: aiosqlite.Connection) -> None:
+        """Ensure messages_fts / messages_fts_trigram have message_id+session_id columns."""
+        await self._ensure_fts_table(conn, "messages_fts", tokenize="unicode61")
+        await self._ensure_fts_table(conn, "messages_fts_trigram", tokenize="trigram")
+
+    async def _ensure_fts_table(
+        self,
+        conn: aiosqlite.Connection,
+        table: str,
+        *,
+        tokenize: str,
+    ) -> None:
+        required = {"content", "message_id", "session_id"}
+        cursor = await conn.cursor()
+        await cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        exists = await cursor.fetchone() is not None
+        needs_rebuild = False
+        if exists:
+            await cursor.execute(f"PRAGMA table_info({table})")
+            cols = {row[1] for row in await cursor.fetchall()}
+            if not required.issubset(cols):
+                needs_rebuild = True
+                self._logger.warning(
+                    "FTS table %s legacy schema columns=%s; rebuilding",
+                    table,
+                    sorted(cols),
+                )
+        if exists and not needs_rebuild:
+            return
+        if exists:
+            await conn.execute(f"DROP TABLE IF EXISTS {table}")
+        await conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE {table} USING fts5(
+                content,
+                message_id UNINDEXED,
+                session_id UNINDEXED,
+                tokenize='{tokenize}'
+            )
+            """
+        )
+        await conn.execute(
+            f"""
+            INSERT INTO {table} (message_id, session_id, content)
+            SELECT message_id, session_id, content FROM messages
+            WHERE content IS NOT NULL AND content <> '' AND content <> '[redacted]'
+            """
+        )
+        self._logger.info("FTS table %s ready (rebuilt=%s)", table, needs_rebuild)
     
     @asynccontextmanager
     async def _get_connection(self):
@@ -354,7 +421,21 @@ class AsyncSQLiteRelationalAdapter:
                 data["session_id"],
                 data.get("content") or "",
             )
+            await cursor.execute(
+                """
+                UPDATE sessions
+                SET message_count = (
+                    SELECT COUNT(*) FROM messages WHERE session_id = :session_id
+                )
+                WHERE session_id = :session_id
+                """,
+                {"session_id": data["session_id"]},
+            )
         return str(data["message_id"])
+
+    async def append_message(self, data: dict) -> str:
+        """Hermes L2：每轮 append_message（persist_turn 对齐入口）。"""
+        return await self.insert_message(data)
 
     async def insert_tool_call(self, data: dict) -> str:
         columns = ", ".join(data.keys())
@@ -372,20 +453,27 @@ class AsyncSQLiteRelationalAdapter:
         session_id: str,
         content: str,
     ) -> None:
-        await cursor.execute(
-            "DELETE FROM messages_fts WHERE message_id = :message_id",
-            {"message_id": message_id},
-        )
+        for table in ("messages_fts", "messages_fts_trigram"):
+            await cursor.execute(
+                f"DELETE FROM {table} WHERE message_id = :message_id",
+                {"message_id": message_id},
+            )
         if not content or content == "[redacted]":
             return
+        params = {
+            "message_id": message_id,
+            "session_id": session_id,
+            "content": content,
+        }
         await cursor.execute(
             "INSERT INTO messages_fts (message_id, session_id, content) "
             "VALUES (:message_id, :session_id, :content)",
-            {
-                "message_id": message_id,
-                "session_id": session_id,
-                "content": content,
-            },
+            params,
+        )
+        await cursor.execute(
+            "INSERT INTO messages_fts_trigram (message_id, session_id, content) "
+            "VALUES (:message_id, :session_id, :content)",
+            params,
         )
 
     @staticmethod
@@ -403,8 +491,10 @@ class AsyncSQLiteRelationalAdapter:
         tenant_id: Optional[str],
         query: str,
         limit: int,
+        *,
+        fts_table: str = "messages_fts",
     ) -> List[dict]:
-        conditions = ["messages_fts MATCH :fts_query"]
+        conditions = [f"{fts_table} MATCH :fts_query"]
         params: dict = {
             "fts_query": self._build_fts_query(query),
             "limit": limit,
@@ -423,18 +513,70 @@ class AsyncSQLiteRelationalAdapter:
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT m.* FROM messages m
+            SELECT m.*, bm25({fts_table}) AS rank_score,
+                   s.source AS session_source
+            FROM messages m
             JOIN sessions s ON m.session_id = s.session_id
-            JOIN messages_fts f ON m.message_id = f.message_id
+            JOIN {fts_table} f ON m.message_id = f.message_id
             WHERE {where}
-            ORDER BY m.ts DESC
+            ORDER BY rank_score ASC, m.ts DESC
             LIMIT :limit
         """
         async with self._get_connection() as conn:
             cursor = await conn.cursor()
             await cursor.execute(sql, params)
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return [self._row_with_bm25_score(dict(row)) for row in rows]
+
+    @staticmethod
+    def _row_with_bm25_score(row: dict) -> dict:
+        rank = float(row.pop("rank_score", 0.0))
+        row["score"] = 1.0 / (1.0 + max(rank, 0.0))
+        row["bm25_score"] = rank
+        return row
+
+    async def search_messages_ranked(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[dict]:
+        if not query:
+            return []
+        merged: dict[str, dict] = {}
+        for fts_table in ("messages_fts", "messages_fts_trigram"):
+            try:
+                rows = await self._search_messages_fts(
+                    session_id,
+                    user_id,
+                    tenant_id,
+                    query,
+                    limit,
+                    fts_table=fts_table,
+                )
+            except Exception as e:
+                self._logger.debug("FTS search on %s failed: %s", fts_table, e)
+                rows = []
+            for row in rows:
+                mid = str(row.get("message_id") or "")
+                if not mid:
+                    continue
+                prev = merged.get(mid)
+                if prev is None or float(row.get("score") or 0) > float(
+                    prev.get("score") or 0
+                ):
+                    merged[mid] = row
+        hits = sorted(
+            merged.values(),
+            key=lambda r: (-float(r.get("score") or 0.0), str(r.get("ts") or "")),
+        )
+        if hits:
+            return hits[:limit]
+        return await self._search_messages_like(
+            session_id, user_id, tenant_id, query, limit
+        )
 
     async def _search_messages_like(
         self,
@@ -501,16 +643,196 @@ class AsyncSQLiteRelationalAdapter:
     ) -> List[dict]:
         if query:
             try:
-                rows = await self._search_messages_fts(
+                return await self.search_messages_ranked(
                     session_id, user_id, tenant_id, query, limit
                 )
-                if rows:
-                    return rows
             except Exception as e:
-                self._logger.debug("FTS search fallback to LIKE: %s", e)
+                self._logger.debug("Ranked FTS search fallback to LIKE: %s", e)
         return await self._search_messages_like(
             session_id, user_id, tenant_id, query, limit
         )
+
+    async def get_session(self, session_id: str) -> Optional[dict]:
+        return await self.select_one(
+            "sessions",
+            [
+                "session_id",
+                "user_id",
+                "tenant_id",
+                "channel",
+                "started_at",
+                "ended_at",
+                "status",
+                "parent_session_id",
+                "title",
+                "message_count",
+                "source",
+                "end_reason",
+            ],
+            {"session_id": session_id},
+        )
+
+    async def get_message(self, message_id: str) -> Optional[dict]:
+        return await self.select_one(
+            "messages",
+            [
+                "message_id",
+                "session_id",
+                "role",
+                "content",
+                "ts",
+                "token_count",
+                "metadata_json",
+                "source",
+            ],
+            {"message_id": message_id},
+        )
+
+    async def get_session_parent_id(self, session_id: str) -> Optional[str]:
+        row = await self.select_one(
+            "sessions",
+            ["parent_session_id"],
+            {"session_id": session_id},
+        )
+        if not row:
+            return None
+        parent = row.get("parent_session_id")
+        return str(parent) if parent else None
+
+    async def get_messages_around(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        before: int = 5,
+        after: int = 5,
+    ) -> List[dict]:
+        anchor = await self.get_message(message_id)
+        if anchor is None or anchor.get("session_id") != session_id:
+            return []
+        ts = anchor.get("ts") or ""
+        prior = await self.select_many(
+            "messages",
+            ["message_id", "session_id", "role", "content", "ts"],
+            where={"session_id": session_id},
+            order_by="ts ASC",
+        )
+        idx = next(
+            (i for i, row in enumerate(prior) if row.get("message_id") == message_id),
+            -1,
+        )
+        if idx < 0:
+            return [anchor]
+        start = max(0, idx - before)
+        end = min(len(prior), idx + after + 1)
+        return prior[start:end]
+
+    async def get_session_bookend(
+        self, session_id: str, *, which: str = "first"
+    ) -> Optional[dict]:
+        order = "ts ASC" if which == "first" else "ts DESC"
+        rows = await self.select_many(
+            "messages",
+            ["message_id", "session_id", "role", "content", "ts"],
+            where={"session_id": session_id},
+            order_by=order,
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    async def list_sessions_rich(
+        self,
+        tenant_id: str,
+        user_id: str,
+        *,
+        limit: int = 20,
+        sort: str = "newest",
+    ) -> List[dict]:
+        order = "started_at DESC" if sort != "oldest" else "started_at ASC"
+        return await self.select_many(
+            "sessions",
+            [
+                "session_id",
+                "user_id",
+                "tenant_id",
+                "channel",
+                "started_at",
+                "ended_at",
+                "status",
+                "parent_session_id",
+                "title",
+                "message_count",
+                "source",
+                "end_reason",
+            ],
+            where={"tenant_id": tenant_id, "user_id": user_id},
+            order_by=order,
+            limit=limit,
+        )
+
+    async def create_compression_child_session(
+        self,
+        parent_session_id: str,
+        *,
+        new_session_id: str,
+        tenant_id: str,
+        user_id: str,
+        channel: str = "chat",
+    ) -> dict:
+        from datetime import datetime
+
+        parent = await self.get_session(parent_session_id)
+        if parent is None:
+            raise ValueError(f"parent session not found: {parent_session_id}")
+        base_title = str(parent.get("title") or parent_session_id)
+        suffix_match = re.search(r" #(\d+)$", base_title)
+        if suffix_match:
+            next_num = int(suffix_match.group(1)) + 1
+            root_title = base_title[: suffix_match.start()]
+        else:
+            next_num = 2
+            root_title = base_title
+        title = f"{root_title} #{next_num}"
+        now = datetime.now().isoformat()
+        await self.end_session(parent_session_id, status="closed")
+        await self.update(
+            "sessions",
+            {"end_reason": "compression"},
+            {"session_id": parent_session_id},
+        )
+        async with self._get_connection() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                """
+                INSERT INTO sessions (
+                    session_id, user_id, tenant_id, channel, started_at, status,
+                    parent_session_id, title, source, message_count
+                ) VALUES (
+                    :session_id, :user_id, :tenant_id, :channel, :started_at, :status,
+                    :parent_session_id, :title, :source, 0
+                )
+                ON CONFLICT(session_id) DO UPDATE SET
+                    parent_session_id = excluded.parent_session_id,
+                    title = excluded.title,
+                    status = excluded.status
+                """,
+                {
+                    "session_id": new_session_id,
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "channel": channel,
+                    "started_at": now,
+                    "status": "active",
+                    "parent_session_id": parent_session_id,
+                    "title": title,
+                    "source": parent.get("source") or "user",
+                },
+            )
+        return {
+            "parent_session_id": parent_session_id,
+            "session_id": new_session_id,
+            "title": title,
+        }
 
     async def search_tool_calls(
         self,
@@ -641,6 +963,10 @@ class AsyncSQLiteRelationalAdapter:
                 {"cutoff": cutoff},
             )
             await cursor.execute(
+                f"DELETE FROM messages_fts_trigram WHERE {expired_filter}",
+                {"cutoff": cutoff},
+            )
+            await cursor.execute(
                 f"DELETE FROM messages WHERE {expired_filter}",
                 {"cutoff": cutoff},
             )
@@ -702,6 +1028,19 @@ class AsyncSQLiteRelationalAdapter:
             await cursor.execute(
                 """
                 DELETE FROM messages_fts
+                WHERE message_id IN (
+                    SELECT message_id FROM messages
+                    WHERE session_id IN (
+                        SELECT session_id FROM sessions
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id
+                    )
+                )
+                """,
+                {"tenant_id": tenant_id, "user_id": user_id},
+            )
+            await cursor.execute(
+                """
+                DELETE FROM messages_fts_trigram
                 WHERE message_id IN (
                     SELECT message_id FROM messages
                     WHERE session_id IN (
@@ -1025,6 +1364,10 @@ class AsyncSQLiteRelationalAdapter:
             cursor = await conn.cursor()
             await cursor.execute(
                 "DELETE FROM messages_fts WHERE session_id = :session_id",
+                {"session_id": session_id},
+            )
+            await cursor.execute(
+                "DELETE FROM messages_fts_trigram WHERE session_id = :session_id",
                 {"session_id": session_id},
             )
             await cursor.execute(

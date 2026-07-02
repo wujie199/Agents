@@ -201,7 +201,7 @@ def main() -> None:
         "--rerank-min-score",
         type=float,
         default=None,
-        help="Rerank 分数阈值（仅保留 > 该值的结果；默认读 config/rag_pipeline.yml）",
+        help="Rerank 分数阈值（仅保留 > 该值的结果；默认读 config/rag.yml）",
     )
     parser.add_argument(
         "--allow-doc-id",
@@ -213,7 +213,7 @@ def main() -> None:
     parser.add_argument(
         "--scenario",
         default=None,
-        help="场景名（见 config/scenarios.yml，解析为标签过滤）",
+        help="场景名（见 config/rag.yml → scenarios，解析为标签过滤）",
     )
     parser.add_argument(
         "--tag",

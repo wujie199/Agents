@@ -16,7 +16,7 @@ DEFAULT_RERANK_MODEL = DEFAULT_MODEL_ROOT / "rerank" / "bge-reranker-base"
 # 本地对话：外置盘 HF 权重 / 已运行的 Ollama·vLLM（本项目不会 pull / 下载）
 DEFAULT_LOCAL_LLM_ROOT = DEFAULT_MODEL_ROOT / "llm"
 DEFAULT_LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
-DEFAULT_CLOUD_CHAT_MODEL = "qwen3.6-plus"
+DEFAULT_CLOUD_CHAT_MODEL = "qwen3.7-plus"
 
 
 def external_volume_name(path: Path | str) -> str | None:

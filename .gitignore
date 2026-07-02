@@ -33,6 +33,7 @@ data/index/
 data/cache/
 data/chroma/
 data/chroma_dev/
+data/chroma*/
 data/rag_offline/
 data/bm25_index/
 data/session_vectors/

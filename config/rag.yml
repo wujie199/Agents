@@ -1,0 +1,215 @@
+# RAG 统一配置（模型路径见 config/models.yml；chat 侧 RAG 门控见 config/chat.yml）
+
+collection_name: agent
+
+enable_vector_index: true
+enable_graph_index: true
+
+chunk_size: 800
+chunk_overlap: 0
+chunk_strategy: faq
+default_top_k: 10
+rerank_top_n: 5
+enable_cache: true
+cache_ttl_seconds: 900
+model_version: bge-small-zh-v1.5-local
+embedding_batch_size: 32
+
+storage:
+  chroma:
+    persist_directory: chroma_db
+    hnsw_space: cosine
+    hnsw_construction_ef: 200
+    hnsw_search_ef: 100
+    hnsw_M: 16
+    k: 10
+    hybrid_search: false
+    bm25_k: 10
+    hybrid_weights: [0.5, 0.5]
+  legacy:
+    md5_hex_store: md5.txt
+    data_path: data
+    allowed_konwledge_file_type: [pdf, txt]
+    exclude_filenames:
+      - 常见问题.txt
+
+# 元数据打标（rule_keyword backend）
+metadata:
+  enabled: true
+  backend: rule_keyword
+  rules_path: null
+  max_tags: 32
+  tag_filename: true
+  rules:
+    - name: contract
+      tags: [合同, 法律]
+      keywords: [甲方, 乙方, 违约责任, 合同编号, 合同, 协议, 签署]
+      match: any
+    - name: rental
+      tags: [租赁, 合同]
+      keywords: [租房, 租金, 押金, 租期, 房东, 租客]
+      match: any
+    - name: finance
+      tags: [财务, 发票]
+      keywords: [发票, 税率, 金额, 付款, 账单]
+      match: any
+    - name: technical
+      tags: [技术文档]
+      keywords: [API, 接口, 部署, 配置, 架构]
+      match: any
+    - name: hr
+      tags: [人事]
+      keywords: [员工, 入职, 离职, 薪资, 考勤]
+      match: any
+    - name: maintenance
+      tags: [maintenance, 维护保养]
+      keywords: [维护保养, 清洁机器人时, 断开电源, 尘盒, 主刷, 边刷, 滤网, 充电触点, 机身外壳]
+      match: any
+  extension_tags:
+    pdf: [pdf]
+    docx: [word]
+    doc: [word]
+    md: [markdown]
+    txt: [text]
+
+# 单库多场景检索（python document/query_rag.py --scenario customer_service）
+scenarios:
+  default_scenario: null
+  items:
+    customer_service:
+      tags: [FAQ, 售后, 租赁]
+      tag_match: any
+    legal:
+      tags: [合同, 法律]
+      tag_match: any
+    finance:
+      tags: [财务, 发票]
+      tag_match: any
+    technical:
+      tags: [技术文档, API]
+      tag_match: any
+    hr:
+      tags: [人事]
+      tag_match: any
+    product:
+      tags: [产品]
+      tag_match: any
+
+ingest:
+  mode: ocr_only
+  routing: simplified
+  plain_text_formats: [txt, md]
+  ocr_backend: auto
+  language: ch
+  word_to_pdf: true
+  word_converter: libreoffice
+  pdf_dpi: 200
+  ocr_use_layout: true
+  enable_cleaning: true
+  ocr_postprocess: true
+  cleaning_level: standard
+  ocr_device: cpu
+  ocr_preprocess: auto
+  ocr_enable_formula: true
+  ocr_formula_model: PP-FormulaNet_plus-S
+  ocr_max_attempts: 3
+  ocr_fast: true
+  ocr_table_e2e: false
+  ocr_enable_mkldnn: true
+
+retrieval:
+  primary_backend: vector
+  enable_hybrid: true
+  enable_vector_search: true
+  enable_bm25_search: true
+  vector_top_k: 10
+  bm25_top_k: 10
+  hybrid_weights: [0.32, 0.68]
+  fusion_strategy: weighted
+  fusion_top_n: 10
+  enable_rerank: true
+  rerank_top_n: 5
+  rerank_min_score: 0.4
+  use_mock_rerank_fallback: true
+  enable_router: true
+  auto_route: false
+  enable_graph: false
+  enable_sql: false
+
+rewrite:
+  enable_hyde: false
+  enable_multi_query: true
+  multi_query_count: 3
+  enable_rule_rewrite: true
+  rule_max_queries: 4
+  maintenance_source_boost: 0.12
+  maintenance_post_rerank_boost: 0.18
+  faq_non_maintenance_penalty: 0.12
+  llm_rewrite_once: true
+  hybrid_search_concurrency: 4
+  default_profile: generic_knowledge
+  two_stage:
+    enabled: true
+    top1_min_rerank: 0.75
+    require_maintenance_source: true
+  profiles:
+    maintenance:
+      rule: true
+      llm: on_miss
+      max_hybrid_queries: 6
+    faq_like:
+      rule: true
+      llm: never
+      max_hybrid_queries: 3
+    how_to:
+      rule: true
+      llm: on_miss
+      max_hybrid_queries: 4
+    product_compare:
+      rule: true
+      llm: on_miss
+      max_hybrid_queries: 4
+    exact_lookup:
+      rule: false
+      llm: never
+      max_hybrid_queries: 1
+    generic_knowledge:
+      rule: false
+      llm: never
+      max_hybrid_queries: 2
+
+# RAGAS 评测（scripts/rag_eval.py）
+eval:
+  generation:
+    model_role: eval_generation_llm
+    memory_system: "你是知识库 FAQ 问答助手。请基于检索片段准确、简洁地回答用户问题，只答所问，保留原文中的数字与步骤。"
+    max_evidence_chars: 3000
+    max_evidence_items: 2
+    rag_min_score: 0.0
+    rag_min_keep: 1
+    strict_grounding: true
+    eval_strict_answer: true
+    temperature: 0
+    max_tokens: 320
+    enable_thinking: false
+  judge:
+    model_role: eval_judge_llm
+    embedding_role: embedding
+  metrics:
+    full:
+      - context_precision
+      - context_recall
+      - faithfulness
+      - answer_relevancy
+      - answer_correctness
+      - context_relevancy
+    retrieval_only:
+      - context_precision
+      - context_recall
+  ir:
+    enabled: true
+    ks: [1, 3, 5]
+    min_overlap_chars: 20
+  output:
+    results_dir: data/rag_eval/results
+    preview_chars: 500

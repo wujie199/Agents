@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import yaml
 
 from document.model_mount import warn_if_unmounted
 from document.rag.config.embedding import EmbeddingConfig
@@ -12,7 +11,18 @@ from document.rag.config.rerank import RerankConfig
 from document.rag.config.metadata import MetadataConfig
 from document.rag.config.ingest import IngestConfig
 from document.rag.config.retrieval import RetrievalConfig
-from document.rag.config.rewrite import RewriteConfig
+from document.rag.config.rewrite import (
+    RewriteConfig,
+    TwoStageConfig,
+    parse_rewrite_profiles,
+)
+from document.rag.config.rag_yaml import (
+    RAG_PROFILES,
+    RAG_PIPELINE_PROFILES,
+    load_rag_yaml_document,
+    resolve_rag_config_path,
+    resolve_rag_pipeline_config_path,
+)
 
 
 @dataclass(frozen=True)
@@ -39,11 +49,6 @@ class RagPipelineConfig:
     enable_semantic_dedupe: bool = False
     semantic_dedupe_threshold: float = 0.85
     cleaners: Optional[Dict[str, Any]] = None
-
-
-def warn_local_model_paths(cfg: RagPipelineConfig) -> None:
-    """兼容旧调用；模型路径警告见 warn_model_instances。"""
-    _ = cfg
 
 
 def warn_model_instances(config_dir: str = "config") -> None:
@@ -111,29 +116,15 @@ def _apply_rag_env_overrides(cfg: RagPipelineConfig) -> RagPipelineConfig:
     return replace(cfg, retrieval=retrieval)
 
 
-RAG_PIPELINE_PROFILES = frozenset({"faq", "contract"})
+RAG_PIPELINE_PROFILES = RAG_PROFILES
 
 
 def resolve_rag_pipeline_config_path(
     config_dir: str = "config",
     profile: Optional[str] = None,
 ) -> str:
-    """解析 RAG 管道 YAML 路径：profile > RAG_PIPELINE_CONFIG 环境变量 > 默认。"""
-    if profile:
-        key = profile.lower().strip()
-        if key not in RAG_PIPELINE_PROFILES:
-            raise ValueError(
-                f"未知 profile: {profile!r}，可选: {', '.join(sorted(RAG_PIPELINE_PROFILES))}"
-            )
-        path = Path(config_dir) / f"rag_pipeline.{key}.yml"
-        if not path.exists():
-            raise FileNotFoundError(f"profile 配置文件不存在: {path}")
-        return str(path)
-
-    env_path = os.environ.get("RAG_PIPELINE_CONFIG")
-    if env_path:
-        return env_path
-    return str(Path(config_dir) / "rag_pipeline.yml")
+    """解析 RAG YAML 路径（兼容旧 API）。"""
+    return resolve_rag_config_path(config_dir, profile)
 
 
 def detect_rag_profile_for_path(file_path: str | Path) -> str:
@@ -151,18 +142,13 @@ def load_rag_pipeline_config(
     config_dir: str = "config",
 ) -> RagPipelineConfig:
     if config_path is None:
-        env_path = os.environ.get("RAG_PIPELINE_CONFIG")
-        if env_path:
-            config_path = env_path
-        else:
-            config_path = str(Path(config_dir) / "rag_pipeline.yml")
+        config_path = resolve_rag_config_path(config_dir)
 
     path = Path(config_path)
     if not path.exists():
         return RagPipelineConfig()
 
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    raw = load_rag_yaml_document(path, config_dir=config_dir)
 
     ingest_raw = raw.get("ingest") or {}
     retrieval_raw = raw.get("retrieval") or {}
@@ -171,17 +157,11 @@ def load_rag_pipeline_config(
     rerank_raw = raw.get("rerank") or {}
     metadata_raw = raw.get("metadata") or {}
 
-    chroma_path = Path(config_dir) / "chroma.yml"
-    default_rules = str(Path(config_dir) / "metadata_tagging.yml")
     collection_name = raw.get("collection_name", "agent")
     chroma: dict = dict(raw.get("storage", {}).get("chroma") or {})
-    if chroma_path.exists():
-        with open(chroma_path, "r", encoding="utf-8") as f:
-            legacy_chroma = yaml.safe_load(f) or {}
-        for key, value in legacy_chroma.items():
-            chroma.setdefault(key, value)
-    if path.name == "rag_pipeline.yml" and not raw.get("collection_name"):
-        collection_name = chroma.get("collection_name", collection_name)
+    legacy_chroma = dict(raw.get("storage", {}).get("legacy") or {})
+    for key, value in legacy_chroma.items():
+        chroma.setdefault(key, value)
 
     cfg = RagPipelineConfig(
         collection_name=collection_name,
@@ -210,9 +190,11 @@ def load_rag_pipeline_config(
         metadata=MetadataConfig(
             enabled=bool(metadata_raw.get("enabled", True)),
             backend=str(metadata_raw.get("backend", "rule_keyword")),
-            rules_path=metadata_raw.get("rules_path") or default_rules,
+            rules_path=metadata_raw.get("rules_path"),
             max_tags=int(metadata_raw.get("max_tags", 32)),
             tag_filename=bool(metadata_raw.get("tag_filename", True)),
+            rules=metadata_raw.get("rules"),
+            extension_tags=metadata_raw.get("extension_tags"),
         ),
         ingest=IngestConfig(
             routing=ingest_raw.get("routing", "simplified"),
@@ -284,8 +266,43 @@ def load_rag_pipeline_config(
         ),
         rewrite=RewriteConfig(
             enable_hyde=rewrite_raw.get("enable_hyde", False),
-            enable_multi_query=rewrite_raw.get("enable_multi_query", False),
+            enable_multi_query=rewrite_raw.get("enable_multi_query", True),
             multi_query_count=int(rewrite_raw.get("multi_query_count", 3)),
+            enable_rule_rewrite=rewrite_raw.get("enable_rule_rewrite", True),
+            rule_max_queries=int(rewrite_raw.get("rule_max_queries", 4)),
+            maintenance_source_boost=float(
+                rewrite_raw.get("maintenance_source_boost", 0.12)
+            ),
+            maintenance_post_rerank_boost=float(
+                rewrite_raw.get("maintenance_post_rerank_boost", 0.18)
+            ),
+            faq_non_maintenance_penalty=float(
+                rewrite_raw.get("faq_non_maintenance_penalty", 0.12)
+            ),
+            llm_rewrite_once=rewrite_raw.get("llm_rewrite_once", True),
+            max_hybrid_queries=int(rewrite_raw.get("max_hybrid_queries", 6)),
+            hybrid_search_concurrency=int(
+                rewrite_raw.get("hybrid_search_concurrency", 4)
+            ),
+            default_profile=str(
+                rewrite_raw.get("default_profile", "generic_knowledge")
+            ),
+            profiles=parse_rewrite_profiles(rewrite_raw.get("profiles")),
+            two_stage=TwoStageConfig(
+                enabled=bool(
+                    (rewrite_raw.get("two_stage") or {}).get("enabled", True)
+                ),
+                top1_min_rerank=float(
+                    (rewrite_raw.get("two_stage") or {}).get(
+                        "top1_min_rerank", 0.75
+                    )
+                ),
+                require_maintenance_source=bool(
+                    (rewrite_raw.get("two_stage") or {}).get(
+                        "require_maintenance_source", True
+                    )
+                ),
+            ),
         ),
     )
     cfg = _apply_rag_env_overrides(cfg)

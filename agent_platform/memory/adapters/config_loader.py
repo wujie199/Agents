@@ -2,8 +2,19 @@ import os
 from pathlib import Path
 from typing import Any
 
-import yaml
+from agent_platform.memory.adapters.memory_yaml import (
+    load_memory_yaml_document,
+    resolve_memory_config_path,
+)
 
+_LEGACY_MEMORY_FILENAMES = frozenset(
+    {
+        "memory.dev-vector.example.yml",
+        "memory.dev-cold.example.yml",
+        "memory.dev-skills.example.yml",
+        "memory.dev-l4-http.example.yml",
+    }
+)
 
 DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "hot_memory_max_chars": 2200,
@@ -48,6 +59,10 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "turn_buffer_flush_size": 10,
     "l1_use_file_lock": True,
     "l1_store_backend": "file",
+    "l1_hermes_entries": True,
+    "l1_write_approval": False,
+    "l1_nudge_interval": 10,
+    "l2_compression_continuation": "split",
     "skills_meta_dir": "skills/meta",
     "skill_auto_extract_draft": True,
     "skill_deprecate_threshold": 0.2,
@@ -63,24 +78,6 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "purge_delete_external_audit": True,
     "purge_tenant_l4_strip_user_keys": True,
 }
-
-
-def resolve_memory_config_path(
-    config_dir: str = "config",
-    *,
-    profile: str = "dev",
-) -> str:
-    """解析记忆配置文件路径（尊重 MEMORY_CONFIG / production 默认）。"""
-    env_path = os.environ.get("MEMORY_CONFIG")
-    if env_path:
-        return env_path
-    base = Path(config_dir)
-    if profile == "production":
-        for name in ("memory.production.yml", "memory.production.example.yml"):
-            candidate = base / name
-            if candidate.is_file():
-                return str(candidate)
-    return str(base / "memory.yml")
 
 
 def ensure_memory_config_env(
@@ -100,10 +97,17 @@ def ensure_memory_config_env(
 def load_memory_config(config_path: str = "config/memory.yml") -> dict[str, Any]:
     env_path = os.environ.get("MEMORY_CONFIG")
     path = Path(env_path) if env_path else Path(config_path)
+    if (
+        env_path
+        and not path.is_file()
+        and path.name not in _LEGACY_MEMORY_FILENAMES
+    ):
+        path = Path(config_path)
+    config_dir = str(path.parent) if path.parent.is_dir() else "config"
+
     cfg = dict(DEFAULT_MEMORY_CONFIG)
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
+    loaded = load_memory_yaml_document(path, config_dir=config_dir)
+    if loaded or path.exists():
         cfg.update(loaded)
-    cfg["_config_path"] = str(path)
+    cfg["_config_path"] = str(path if path.exists() or env_path else config_path)
     return cfg

@@ -219,6 +219,8 @@ def prometheus_text(
             if not (
                 name.startswith("memory.")
                 or name.startswith("cache.")
+                or name.startswith("graph.")
+                or name.startswith("agent.")
             ):
                 continue
             total = sum(values)

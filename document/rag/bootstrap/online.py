@@ -169,6 +169,7 @@ def build_rag_stack(
         config=rag_config,
         router=router,
         bm25_index=bm25_index,
+        query_rewriter=query_rewriter,
     )
 
     ingest_port = build_ingest_pipeline(rag_config)

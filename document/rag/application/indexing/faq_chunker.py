@@ -94,6 +94,13 @@ def headers_before(text: str, end_pos: int) -> Tuple[Optional[str], Optional[str
     return faq_category, faq_section
 
 
+def sanitize_faq_content(content: str) -> str:
+    """去掉清洗/切块产生的 -？ 等 artifact。"""
+    s = re.sub(r"\n-\s*[？?]\s*\n?", "\n", content)
+    s = re.sub(r"(?<=\n)-\s*[？?]\s*", "", s)
+    return s.strip()
+
+
 def normalize_faq_text(text: str) -> str:
     """在 OCR 粘连的题号/章节前插入换行，并保护「第 N 页」标记。"""
     if not text:
@@ -113,6 +120,12 @@ def normalize_faq_text(text: str) -> str:
         r"([\u4e00-\u9fff]{1,2}(?:系统|指南|技巧|规划))"
         r"(?=\d{1,3}(?=[\u4e00-\u9fff\"「]))",
         r"\1\n\2\n",
+        s,
+    )
+    # 粘连的下一题：「…回充4 APP无法连接」→ 题号前换行
+    s = re.sub(
+        r"([\u4e00-\u9fff。！？])(\d{1,3})(?=\s+[A-Za-z\u4e00-\u9fff\"「])",
+        r"\1\n\2",
         s,
     )
     s = re.sub(r"(\D)(\d{1,3})(?=[\u4e00-\u9fff\"「])", r"\1\n\2", s)
@@ -144,7 +157,7 @@ def format_faq_block(
             if _QUESTION_HINT.search(question):
                 question += "？"
         answer, _trailing = extract_trailing_section(answer)
-        content = f"{num}. {question}\n{answer}".strip()
+        content = sanitize_faq_content(f"{num}. {question}\n{answer}".strip())
         return FaqItem(
             content=content,
             faq_number=num,
@@ -153,7 +166,7 @@ def format_faq_block(
         )
     body, _trailing = extract_trailing_section(body)
     return FaqItem(
-        content=f"{num}. {body}",
+        content=sanitize_faq_content(f"{num}. {body}"),
         faq_number=num,
         faq_category=faq_category,
         faq_section=faq_section,

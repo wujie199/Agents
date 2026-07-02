@@ -217,6 +217,39 @@ class SkillMemoryAdapter:
                 extra["auto_draft_id"] = draft_id
         return extra
 
+    async def on_session_end(self, context: RequestContext) -> dict:
+        """会话结束时：对本轮成功 skill runs 补做 auto_extract（配置开启时）。"""
+        if not self._auto_extract_draft:
+            return {"enabled": False, "drafts": []}
+        runs = await self.list_skill_runs(
+            context.tenant_id, user_id=context.user_id, limit=100
+        )
+        session_runs = [
+            r for r in runs if r.get("session_id") == context.session_id
+        ]
+        drafts: List[dict] = []
+        seen: set[str] = set()
+        for run in session_runs:
+            if not run.get("success"):
+                continue
+            steps = int(run.get("steps_executed") or 0)
+            if steps < self._auto_extract_min_steps:
+                continue
+            skill_id = str(run.get("skill_id") or "")
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            draft_id = self.maybe_extract_draft_from_skill(
+                context.tenant_id, skill_id, suffix="_auto"
+            )
+            if draft_id:
+                drafts.append({"skill_id": skill_id, "draft_id": draft_id})
+        return {
+            "enabled": True,
+            "runs_scanned": len(session_runs),
+            "drafts": drafts,
+        }
+
     def record_outcome(
         self,
         tenant_id: str,

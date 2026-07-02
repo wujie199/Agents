@@ -2,7 +2,7 @@
 """RAGAS evaluation CLI — offline RAG pipeline quality assessment.
 
 用法:
-  python scripts/rag_eval.py --profile dev --dataset data/rag_eval/golden/sample.jsonl --mode full --run-id test-run
+  python scripts/rag_eval.py --profile dev --dataset data/rag_eval/golden/test_docs_merged.jsonl --mode full --run-id test-run
   python scripts/rag_eval.py --profile dev --mode retrieval_only --sample-limit 3
 """
 
@@ -32,8 +32,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset",
-        default="data/rag_eval/golden/sample.jsonl",
-        help="Golden dataset JSONL path",
+        default="data/rag_eval/golden/test_docs_merged.jsonl",
+        help="Golden dataset JSONL path (default: merged test_docs txt)",
     )
     parser.add_argument(
         "--mode",
@@ -104,15 +104,20 @@ def main() -> int:
     print(f"  output: {result['output_dir']}")
     print(f"  samples: {summary.get('sample_count')}")
     print(f"  failures: {json.dumps(summary.get('failures', {}), ensure_ascii=False)}")
+    ir_metrics = summary.get("ir_metrics") or {}
+    if ir_metrics:
+        print("  ir_metrics:")
+        for name, score in sorted(ir_metrics.items()):
+            print(f"    {name}: {score:.4f}")
     metrics = summary.get("metrics") or {}
     if metrics:
-        print("  metrics:")
+        print("  ragas_metrics:")
         for name, score in sorted(metrics.items()):
             val = "—" if score is None else f"{score:.4f}"
             print(f"    {name}: {val}")
     elif result.get("ragas_error"):
         print(f"  ragas: skipped/failed — {result['ragas_error']}")
-    else:
+    elif not ir_metrics:
         print("  ragas: no metrics (use --skip-ragas=false with ragas installed)")
     print(f"  report: {result['report_paths'].get('report_html')}")
     return 0

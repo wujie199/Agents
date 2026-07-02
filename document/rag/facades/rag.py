@@ -43,6 +43,7 @@ class RAGPortAdapter:
         cache_ttl_seconds: Optional[int] = None,
         router: Optional[Any] = None,
         bm25_index: Optional[Any] = None,
+        query_rewriter: Optional[QueryRewritePort] = None,
     ):
         self._config = config
         self._vector_port = vector_port
@@ -51,6 +52,7 @@ class RAGPortAdapter:
         self._rerank_model = rerank_model if self._config.retrieval.enable_rerank else None
         self._router = router
         self._bm25_index = bm25_index
+        self._query_rewriter = query_rewriter
         self._collection = self._config.collection_name
         self._default_top_k = default_top_k or self._config.default_top_k
         self._rerank_top_n = rerank_top_n or self._config.rerank_top_n
@@ -120,7 +122,13 @@ class RAGPortAdapter:
             or self._config.retrieval.enable_bm25_search
         )
         if use_hybrid:
-            cache_key = get_cache_key(query, context.tenant_id)
+            from document.rag.application.retrieval.hybrid_pipeline import (
+                _rewrite_queries,
+            )
+
+            rewrite_queries = await _rewrite_queries(query, self._query_rewriter)
+            cache_payload = "|".join(sorted(rewrite_queries))
+            cache_key = get_cache_key(cache_payload, context.tenant_id)
             cached_result = await self._get_from_cache(cache_key)
             if cached_result:
                 _rag_trace(True, "redis_cache_hit", cache_key=cache_key)
@@ -137,6 +145,7 @@ class RAGPortAdapter:
                 config=self._config,
                 top_k=resolved.top_k,
                 rerank_n=resolved.rerank_top_n,
+                query_rewriter=self._query_rewriter,
             )
             await self._set_cache(cache_key, bundle)
             return bundle

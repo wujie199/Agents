@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from document.rag.evaluation.dataset import EvalSample, iter_limited, load_eval_dataset
 from document.rag.evaluation.llm_bridge import build_ragas_models
+from document.rag.evaluation.ir_metrics import score_rows_ir_metrics
 from document.rag.evaluation.metrics import (
     build_ragas_metrics,
     extract_metric_means,
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 async def run_rag_eval(
     *,
     profile: EvalProfile = "dev",
-    dataset_path: str = "data/rag_eval/golden/sample.jsonl",
+    dataset_path: str = "data/rag_eval/golden/test_docs_merged.jsonl",
     mode: EvalMode = "full",
     run_id: str = "eval-run",
     sample_limit: int | None = None,
@@ -69,6 +70,7 @@ async def run_rag_eval(
     )
 
     metric_means: dict[str, float | None] = {}
+    ir_metric_means: dict[str, float] = score_rows_ir_metrics(rows, eval_cfg.ir)
     ragas_error: str | None = None
     evaluable = [r for r in rows if not r.error]
 
@@ -126,6 +128,8 @@ async def run_rag_eval(
         detail = row.to_detail_dict(preview_chars=preview_chars)
         if row.metric_scores:
             detail["metric_scores"] = row.metric_scores
+        if row.ir_scores:
+            detail["ir_scores"] = row.ir_scores
         detail_rows.append(detail)
 
     summary = build_summary(
@@ -136,6 +140,7 @@ async def run_rag_eval(
         sample_count=len(limited),
         rows=rows,
         metric_means=metric_means,
+        ir_metric_means=ir_metric_means,
         config_meta={
             "config_dir": config_dir,
             "data_dir": data_dir,

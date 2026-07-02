@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
-
-import yaml
 
 MatchMode = str  # "any" | "all"
 
@@ -82,16 +79,12 @@ def merge_tags_into_metadata(
     return meta
 
 
+from document.rag.config.rag_yaml import load_rag_scenarios_section
+
+
 def load_scenario_config(config_dir: str = "config") -> Dict[str, Any]:
-    """加载 config/scenarios.yml。"""
-    path = Path(config_dir) / "scenarios.yml"
-    if not path.is_file():
-        return {"scenarios": {}, "default_scenario": None}
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    if "scenarios" not in raw:
-        raw["scenarios"] = {}
-    return raw
+    """加载 config/rag.yml 的 scenarios 段。"""
+    return load_rag_scenarios_section(config_dir)
 
 
 def resolve_scenario_tags(
@@ -116,7 +109,7 @@ def resolve_scenario_tags(
     if scenario:
         entry = scenarios.get(scenario)
         if entry is None:
-            raise KeyError(f"未知场景 {scenario!r}，请检查 config/scenarios.yml")
+            raise KeyError(f"未知场景 {scenario!r}，请检查 config/rag.yml 的 scenarios 段")
         if isinstance(entry, dict):
             tags.extend(parse_tags_value(entry.get("tags")))
             match = tag_match or str(entry.get("tag_match") or "any")

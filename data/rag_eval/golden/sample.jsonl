@@ -1,5 +1,0 @@
-{"id": "sample-001", "question": "扫地机器人如何清理尘盒？", "ground_truth": "定期取出尘盒，倒掉垃圾并清洗滤网，晾干后装回。", "reference_contexts": ["尘盒需要定期清理，取出后倒掉垃圾，清洗滤网并晾干。"], "tenant_id": "default", "tags": ["faq", "maintenance"]}
-{"id": "sample-002", "question": "扫地机器人能自动回充吗？", "ground_truth": "电量低时会自动返回充电座充电。", "reference_contexts": ["低电量时机器人会自动寻找充电座并回充。"], "tenant_id": "default", "tags": ["faq", "battery"]}
-{"id": "sample-003", "question": "地毯模式下吸力会增强吗？", "ground_truth": "进入地毯区域时通常会增强吸力以提高清洁效果。", "reference_contexts": ["地毯模式会提高吸力，以便更好清理地毯灰尘。"], "tenant_id": "default", "tags": ["faq", "carpet"]}
-{"id": "sample-004", "question": "扫地机器人如何在 App 里设置虚拟墙或禁区？", "ground_truth": "在 App 地图界面绘制虚拟墙或禁区，保存后机器人会避开该区域。", "reference_contexts": ["通过 App 在地图上设置虚拟墙/禁区，机器人规划路径时会避开。"], "tenant_id": "default", "tags": ["faq", "app"]}
-{"id": "sample-005", "question": "机器人卡住怎么办？", "ground_truth": "暂停任务，移动到开阔区域后重新启动；检查是否有异物缠绕。", "reference_contexts": ["若机器人卡住，可暂停并将其移到开阔处，检查滚刷/边刷是否缠绕异物。"], "tenant_id": "default", "tags": ["faq", "troubleshoot"]}

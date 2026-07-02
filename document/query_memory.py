@@ -148,7 +148,7 @@ def _build_memory(
 
     from agent_platform.infrastructure.secret.adapter import SecretPortAdapter
 
-    return _build_memory_port(
+    memory, _memory_manager = _build_memory_port(
         config_dir=config_path,
         data_dir=data_path,
         archive_db=archive,
@@ -162,6 +162,7 @@ def _build_memory(
         secret=SecretPortAdapter(),
         mem_cfg_override=overrides,
     )
+    return memory
 
 
 def _memory_from_args(args: argparse.Namespace, **overrides):
@@ -904,7 +905,7 @@ async def cmd_migrate_archive(args: argparse.Namespace) -> int:
             data_dir=str(args.data_dir),
             config_dir=config_path,
         )
-        memory = _build_memory_port(
+        memory, _memory_manager = _build_memory_port(
             config_dir=config_path,
             data_dir=str(args.data_dir),
             archive_db=archive,

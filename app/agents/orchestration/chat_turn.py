@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from core.composition.run_context import RunContext
@@ -12,6 +12,8 @@ from agent_platform.memory.adapters.turn_buffer import TurnBuffer
 
 from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
 from app.agents.orchestration.chat_nodes import build_turn_messages, persist_user_and_assistant
+from app.agents.memory.l0_context import maybe_compress_turn_context, store_prompt_tokens_from_response
+from app.agents.observability.trace_context import resolve_trace_id
 from app.agents.roles.react_loop import _extract_llm_text, _resolve_turn_buffer
 from app.agents.roles.react_turn import (
     dict_messages_to_lc,
@@ -45,6 +47,13 @@ async def run_chat_turn(
     """
     执行一轮对话：L1 快照 + 可选 RAG + 历史 turns + LLM，写入 L2。
     """
+    req = ctx.request
+    trace_id = resolve_trace_id(
+        fallback=req.trace_id if req.trace_id not in ("", "api") else None
+    )
+    if trace_id != req.trace_id:
+        ctx.request = replace(req, trace_id=trace_id)
+
     memory = ctx.require_memory()
     cfg = chat_cfg or load_chat_config()
     use_rag = cfg.enable_rag if enable_rag is None else enable_rag
@@ -69,7 +78,16 @@ async def run_chat_turn(
     else:
         llm = ctx.get_model(role)
         response = await llm.ainvoke(messages)
+        store_prompt_tokens_from_response(ctx, response)
         assistant_text = _extract_llm_text(response)
+
+    post_messages = [*messages, {"role": "assistant", "content": assistant_text}]
+    await maybe_compress_turn_context(
+        ctx,
+        post_messages,
+        chat_cfg=cfg,
+        memory_snapshot_hash=_mem_hash,
+    )
 
     buf = _resolve_turn_buffer(ctx, turn_buffer)
     if persist:
@@ -80,6 +98,13 @@ async def run_chat_turn(
             turn_buffer=buf,
             chat_cfg=cfg,
         )
+
+    from app.agents.memory.l4_context import get_memory_manager
+
+    mgr = get_memory_manager(ctx)
+    if mgr is not None:
+        mgr.sync_all(user_message, assistant_text, post_messages, ctx.request)
+        mgr.queue_prefetch(user_message, ctx.request)
 
     from app.agents.orchestration.chat_nodes import fetch_turn_history
 

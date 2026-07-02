@@ -7,6 +7,7 @@ from core.domain.evidence import Evidence, EvidenceBundle, SourceType
 from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import _format_turns_for_summary
 from app.agents.prompts.prompt_builder import (
+    EVIDENCE_EVAL_GROUNDING_RULES,
     EVIDENCE_GROUNDING_RULES,
     RAG_MISS_GROUNDING_RULES,
     format_evidence_bundle,
@@ -48,6 +49,24 @@ def test_rolling_summary_user_only():
     assert "小红书" in all_text
     assert "小红书" not in user_text
     assert "品牌有哪些" in user_text
+
+
+def test_format_evidence_eval_strict_answer():
+    bundle = EvidenceBundle(
+        evidences=[
+            Evidence(
+                id="1",
+                content="清理充电座周围障碍物，保证充电座前方3米、左右1米无遮挡",
+                score=0.9,
+                source_type=SourceType.VECTOR,
+            )
+        ],
+        empty=False,
+    )
+    text = format_evidence_bundle(bundle, eval_strict_answer=True)
+    assert EVIDENCE_EVAL_GROUNDING_RULES in text
+    assert EVIDENCE_GROUNDING_RULES not in text
+    assert "3米" in text
 
 
 def test_build_chat_messages_tool_hints():

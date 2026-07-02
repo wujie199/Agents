@@ -2,14 +2,18 @@
 
 过期或手动指定的 L2 会话会从在线归档库（SQLite / PostgreSQL）导出为 JSON（可选 gzip），写入对象存储，并在 `cold_archive_sessions` 表建立索引，随后删除在线 `sessions` / `messages` / `tool_calls` 明细。
 
-## 配置（`config/memory.yml`）
+## 配置（`config/memory.yml` → `cold_archive` 段）
+
+dev 默认已开启；单独联调冷归档可用 `MEMORY_PROFILE=cold`。
 
 ```yaml
-enable_cold_archive: false   # 生产示例见 memory.production.example.yml
-cold_archive_prefix: l2/cold
-cold_archive_compress: true
-cold_archive_bucket: agents-storage
-retention_days: 90
+cold_archive:
+  enable_cold_archive: true
+  cold_archive_prefix: l2/cold
+  cold_archive_compress: true
+  cold_archive_bucket: agents-storage
+l2:
+  retention_days: 90
 ```
 
 启用后需配置 `object_store`（生产为 S3/OBS；开发无凭证时 `S3ObjectStoreAdapter` 降级到 `data/objects/`）。

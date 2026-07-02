@@ -9,7 +9,6 @@ from document.rag.config.metadata import MetadataConfig
 from document.rag.config.pipeline import (
     RagPipelineConfig,
     RAG_PIPELINE_PROFILES,
-    warn_local_model_paths,
     compute_index_config_hash,
     detect_rag_profile_for_path,
     load_rag_pipeline_config,
@@ -25,7 +24,6 @@ __all__ = [
     "MetadataConfig",
     "RagPipelineConfig",
     "RAG_PIPELINE_PROFILES",
-    "warn_local_model_paths",
     "compute_index_config_hash",
     "detect_rag_profile_for_path",
     "load_rag_pipeline_config",

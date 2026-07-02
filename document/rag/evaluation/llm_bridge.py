@@ -16,6 +16,28 @@ class RagasModelBundle:
     embeddings: Any | None = None
 
 
+class _AsyncCapableLLM:
+    """Wrap sync-only LangChain chat models for RAGAS async metrics."""
+
+    def __init__(self, llm: Any):
+        self._llm = llm
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._llm, name)
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        import asyncio
+
+        return await asyncio.to_thread(self._llm.invoke, input, config, **kwargs)
+
+    async def agenerate(self, messages: Any, stop: Any = None, **kwargs: Any) -> Any:
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._llm.generate, messages, stop=stop, **kwargs
+        )
+
+
 def _resolve_role_instance(
     registry: Any,
     role: str,
@@ -52,18 +74,94 @@ def _provider_base_url(registry: Any, profile: Any) -> str | None:
 
 
 def _resolve_api_key(profile: Any) -> str | None:
+    """优先使用 models.yml 中的 api_key；仅当未配置时才读 api_key_env。"""
     api_key = getattr(profile, "api_key", None)
+    if api_key:
+        return str(api_key)
     api_key_env = getattr(profile, "api_key_env", None)
     if api_key_env:
-        api_key = api_key or os.environ.get(api_key_env)
-    return api_key
+        return os.environ.get(api_key_env)
+    return None
+
+
+def _patch_chat_huggingface_async() -> None:
+    """RAGAS metrics call ChatHuggingFace._agenerate; HF pipeline is sync-only."""
+    from langchain_huggingface.chat_models.huggingface import (
+        ChatHuggingFace,
+        _is_huggingface_pipeline,
+    )
+
+    if getattr(ChatHuggingFace, "_ragas_async_patched", False):
+        return
+
+    original = ChatHuggingFace._agenerate
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if _is_huggingface_pipeline(self.llm):
+            import asyncio
+
+            llm_input = self._to_chat_prompt(messages)
+            llm_result = await asyncio.to_thread(
+                self.llm._generate,
+                [llm_input],
+                stop,
+                run_manager,
+                **kwargs,
+            )
+            return self._to_chat_result(llm_result)
+        return await original(
+            self, messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+
+    ChatHuggingFace._agenerate = _agenerate
+    ChatHuggingFace._ragas_async_patched = True
+
+
+def _build_local_hf_ragas_llm(profile: Any) -> Any:
+    """RAGAS judge via local HuggingFace weights (no API key)."""
+    import torch
+    from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+    model_path = getattr(profile, "model_path", None)
+    if not model_path:
+        raise ValueError("local_hf judge requires model_path")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
+    )
+    device = 0 if torch.cuda.is_available() else -1
+    gen = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=256,
+        do_sample=False,
+        device=device,
+    )
+    _patch_chat_huggingface_async()
+    chat = ChatHuggingFace(llm=HuggingFacePipeline(pipeline=gen))
+    wrapped = _AsyncCapableLLM(chat)
+    try:
+        from ragas.llms import LangchainLLMWrapper
+
+        return LangchainLLMWrapper(wrapped)
+    except ImportError:
+        return wrapped
 
 
 def build_ragas_llm(registry: Any, eval_cfg: EvalStackConfig) -> Any:
-    """Build RAGAS-compatible LangChain ChatOpenAI from ModelRegistry."""
+    """Build RAGAS-compatible LangChain LLM from ModelRegistry."""
     role = str(eval_cfg.judge.get("model_role") or "eval_judge_llm")
     instance = _resolve_role_instance(registry, role, eval_cfg)
     profile = _resolve_profile(registry, instance)
+
+    provider = str(getattr(profile, "provider", "") or "").lower()
+    if provider == "local_hf":
+        return _build_local_hf_ragas_llm(profile)
 
     from langchain_openai import ChatOpenAI
 

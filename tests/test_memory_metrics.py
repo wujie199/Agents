@@ -56,6 +56,19 @@ def test_prometheus_text_filters_memory_prefix():
     assert "other.metric" not in text
 
 
+def test_prometheus_text_includes_graph_and_agent_metrics():
+    ctx = _ctx_with_obs()
+    ctx.observability.record_metric("graph.node.duration_ms", 12.0)
+    ctx.observability.record_metric("agent.llm.duration_ms", 200.0)
+    ctx.observability.record_metric("agent.tool.calls_total", 1.0)
+    ctx.observability.record_metric("agent.tool.duration_ms", 45.0)
+    text = prometheus_text(ctx)
+    assert "graph.node.duration_ms_total" in text
+    assert "agent.llm.duration_ms_total" in text
+    assert "agent.tool.calls_total_total" in text
+    assert "agent.tool.duration_ms_total" in text
+
+
 def test_stats_from_shared_observability():
     obs = ObservabilityPortAdapter(service_name="shared")
     obs.record_metric("memory.purge", 1.0)

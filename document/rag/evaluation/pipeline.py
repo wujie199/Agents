@@ -39,6 +39,7 @@ class PipelineRow:
     evidence_count: int = 0
     error: str | None = None
     metric_scores: dict[str, float] = field(default_factory=dict)
+    ir_scores: dict[str, float] = field(default_factory=dict)
 
     def ragas_row(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class PipelineRow:
             "tags": self.tags,
             "error": self.error,
             "metric_scores": dict(self.metric_scores),
+            "ir_scores": dict(self.ir_scores),
         }
 
 
@@ -128,6 +130,7 @@ async def generate_answer(
         min_score=float(gen.get("rag_min_score", 0.0)),
         min_keep=int(gen.get("rag_min_keep", 3)),
         strict_grounding=bool(gen.get("strict_grounding", True)),
+        eval_strict_answer=bool(gen.get("eval_strict_answer", False)),
     )
     messages = build_chat_messages(
         memory_system=str(gen.get("memory_system") or "你是知识问答助手。"),
@@ -136,8 +139,15 @@ async def generate_answer(
     )
     role = str(gen.get("model_role") or "main_llm")
     llm = ctx.get_model(role)
+    llm_kwargs: dict[str, Any] = {}
+    if gen.get("temperature") is not None:
+        llm_kwargs["temperature"] = float(gen["temperature"])
+    if gen.get("max_tokens") is not None:
+        llm_kwargs["max_tokens"] = int(gen["max_tokens"])
+    if gen.get("enable_thinking") is False:
+        llm_kwargs["extra_body"] = {"enable_thinking": False}
     t0 = time.perf_counter()
-    response = await llm.ainvoke(messages)
+    response = await llm.ainvoke(messages, **llm_kwargs)
     elapsed_ms = (time.perf_counter() - t0) * 1000
     return _extract_llm_text(response), elapsed_ms
 

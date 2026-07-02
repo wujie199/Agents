@@ -16,8 +16,8 @@ instances:
   dashscope_chat:
     kind: llm
     provider: dashscope
-    model_name: qwen3.6-plus
-    api_key_env: DASHSCOPE_API_KEY
+    model_name: qwen3.6-flash
+    api_key: sk-d922c27b5c4b4ed284e30ae0ba70743f
     timeout: 120
 
   ollama_chat:
@@ -56,6 +56,7 @@ instances:
 roles:
   main_llm:
     instance: dashscope_chat
+    context_window_tokens: 128000
     fallback_chain:
       - ollama_chat
       - local_hf_chat
@@ -67,15 +68,14 @@ roles:
         recovery_timeout: 60
 
   router_llm:
-    instance: ollama_chat
-    fallback_chain:
-      - dashscope_chat
-      - local_hf_chat
+    instance: dashscope_chat
+    fallback_chain: []
     resilience:
       max_retries: 2
+      retry_on_status: [502, 503, 504]
       circuit_breaker:
-        failure_threshold: 3
-        recovery_timeout: 30
+        failure_threshold: 5
+        recovery_timeout: 60
 
   memory_summarizer_llm:
     instance: ollama_chat
@@ -99,3 +99,18 @@ roles:
 
   ocr:
     instance: ocr_paddle
+
+  # RAGAS 评测专用：固定 DashScope，不走本地 HF/Ollama fallback
+  eval_generation_llm:
+    instance: dashscope_chat
+    fallback_chain: []
+    resilience:
+      max_retries: 2
+      retry_on_status: [502, 503, 504]
+
+  eval_judge_llm:
+    instance: dashscope_chat
+    fallback_chain: []
+    resilience:
+      max_retries: 2
+      retry_on_status: [502, 503, 504]

@@ -115,6 +115,9 @@ def _build_memory_port(
         auto_extract_min_steps=int(cfg.get("skill_auto_extract_min_steps", 2)),
     )
     external = build_external_memory(cfg)
+    from agent_platform.memory.adapters.memory_manager import build_memory_manager
+
+    memory_manager = build_memory_manager(cfg, external_memory=external)
     session_vector_index = build_session_vector_index(
         cfg, data_dir=data_dir, config_dir=config_dir, models=models
     )
@@ -126,7 +129,7 @@ def _build_memory_port(
 
     resolved_store = store_dir_override or cfg.get("store_dir") or f"{data_dir}/memory_dev"
 
-    return MemoryPortAdapter(
+    adapter = MemoryPortAdapter(
         store_dir=str(resolved_store),
         archive_db=archive_db,
         hot_memory=hot,
@@ -166,7 +169,15 @@ def _build_memory_port(
         purge_tenant_l4_strip_user_keys=cfg.get(
             "purge_tenant_l4_strip_user_keys", True
         ),
+        l1_hermes_entries=cfg.get("l1_hermes_entries", True),
+        l1_write_approval=cfg.get("l1_write_approval", False),
+        l1_nudge_interval=int(cfg.get("l1_nudge_interval", 10)),
+        l2_compression_continuation=str(
+            cfg.get("l2_compression_continuation", "split")
+        ),
+        on_memory_write=memory_manager.notify_memory_tool_write,
     )
+    return adapter, memory_manager
 
 
 # ── 核心装配逻辑 ──
@@ -191,6 +202,28 @@ def _assemble_run_context(
     """将已构建的各端口组装为 RunContext。"""
     turn_buffer = build_turn_buffer(memory, mem_cfg)
     checkpointer = build_checkpointer(storage.relational)
+
+    from agent_platform.memory.adapters.context_compressor import build_context_compressor
+
+    context_compressor = build_context_compressor(mem_cfg, models)
+    extra = dict(extra)
+    extra["context_compressor"] = context_compressor
+    if "memory_manager" not in extra:
+        extra["memory_manager"] = None
+    extra["l0_config"] = {
+        k: mem_cfg.get(k)
+        for k in (
+            "l0_context_compress_enabled",
+            "context_compress_threshold",
+            "compress_target_ratio",
+            "l0_context_window_tokens",
+            "l0_anti_jitter_pct",
+            "l0_tail_preserve_min",
+            "l0_tool_prune_min_chars",
+            "l0_max_summary_tokens",
+        )
+        if mem_cfg.get(k) is not None
+    }
 
     return RunContext(
         request=request,
@@ -284,7 +317,7 @@ def build_production_context(
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
 
     # ── 记忆 ──
-    memory = _build_memory_port(
+    memory, memory_manager = _build_memory_port(
         config_dir=config_dir,
         data_dir=data_dir,
         archive_db=storage.relational,
@@ -325,6 +358,7 @@ def build_production_context(
             "object_store": storage.object_store,
             "vector_port": storage.vector,
             "data_dir": data_dir,
+            "memory_manager": memory_manager,
             "memory_config_summary": {
                 "memory_config_path": mem_cfg.get("_config_path"),
                 "archive_backend": mem_cfg.get("archive_backend", "sqlite"),
@@ -392,7 +426,7 @@ def build_development_context(
     tools = ToolPortAdapter(config_path=f"{config_dir}/tools.yml")
 
     # ── 记忆 ──
-    memory = _build_memory_port(
+    memory, memory_manager = _build_memory_port(
         config_dir=config_dir,
         data_dir=data_dir,
         archive_db=storage.relational,
@@ -435,5 +469,6 @@ def build_development_context(
             "rag_chroma_dir": chroma_dir,
             "rag_tenant_id": None,
             "data_dir": data_dir,
+            "memory_manager": memory_manager,
         },
     )

@@ -33,6 +33,18 @@ def load_tagging_rules(path: str) -> tuple[List[TaggingRule], Dict[str, List[str
     with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
+    if "rules" not in raw and isinstance(raw.get("metadata"), dict):
+        meta = raw["metadata"]
+        raw = {
+            "rules": meta.get("rules") or [],
+            "extension_tags": meta.get("extension_tags") or {},
+        }
+
+    return parse_tagging_rules_raw(raw)
+
+
+def parse_tagging_rules_raw(raw: dict) -> tuple[List[TaggingRule], Dict[str, List[str]]]:
+    """从 YAML dict 解析 rules 与 extension_tags。"""
     rules: List[TaggingRule] = []
     for item in raw.get("rules") or []:
         if not isinstance(item, dict) or not item.get("name"):

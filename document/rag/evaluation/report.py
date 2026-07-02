@@ -56,6 +56,7 @@ def build_summary(
     sample_count: int,
     rows: list[PipelineRow],
     metric_means: dict[str, float | None],
+    ir_metric_means: dict[str, float] | None = None,
     config_meta: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -66,6 +67,7 @@ def build_summary(
         "dataset": dataset_path,
         "sample_count": sample_count,
         "metrics": metric_means,
+        "ir_metrics": dict(ir_metric_means or {}),
         "failures": _failure_counts(rows),
         "latency": _latency_stats(rows),
         "config": config_meta,
@@ -103,6 +105,8 @@ def render_report_md(summary: dict[str, Any]) -> str:
     ]
     metrics = summary.get("metrics") or {}
     if metrics:
+        lines.append("### RAGAS")
+        lines.append("")
         lines.append("| Metric | Score |")
         lines.append("| --- | --- |")
         for name, score in sorted(metrics.items()):
@@ -110,6 +114,14 @@ def render_report_md(summary: dict[str, Any]) -> str:
             lines.append(f"| {name} | {val} |")
     else:
         lines.append("_No RAGAS metrics computed._")
+
+    ir_metrics = summary.get("ir_metrics") or {}
+    if ir_metrics:
+        lines.extend(["", "### IR (reference_contexts)", ""])
+        lines.append("| Metric | Score |")
+        lines.append("| --- | --- |")
+        for name, score in sorted(ir_metrics.items()):
+            lines.append(f"| {name} | {score:.4f} |")
 
     lines.extend(["", "## Failures", ""])
     failures = summary.get("failures") or {}

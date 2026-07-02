@@ -188,6 +188,12 @@ async def end_agent_session(
     summary = await ctx.require_memory().end_session(
         ctx.request, status=status, finalize=True
     )
+    from app.agents.memory.l4_context import get_memory_manager
+
+    mgr = get_memory_manager(ctx)
+    if mgr is not None:
+        await mgr.on_session_end(ctx.request)
+        mgr.flush_pending(timeout=5.0)
     if not isinstance(summary, dict):
         summary = {}
     summary["l1_extract_pending"] = l1_extract_pending

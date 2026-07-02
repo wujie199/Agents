@@ -87,6 +87,26 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
             context.tenant_id, context.user_id
         )
 
+    async def memory(
+        context: RequestContext,
+        action: str,
+        target: str = "memory",
+        content: str | None = None,
+        old_text: str | None = None,
+        operations: list | None = None,
+    ) -> dict:
+        invoke = getattr(memory, "invoke_memory_tool", None)
+        if invoke is None:
+            return {"success": False, "error": "L1 memory tool not available."}
+        return invoke(
+            context,
+            action=action,
+            target=target,
+            content=content,
+            old_text=old_text,
+            operations=operations,
+        )
+
     tools.register_tool("session_search", session_search, acl=["user"])
     tools.register_tool(
         "session_search_detail", session_search_detail, acl=["user"]
@@ -97,3 +117,4 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
     tools.register_tool(
         "fetch_profile_facts", fetch_profile_facts, acl=["user", "cli"]
     )
+    tools.register_tool("memory", memory, acl=["user"])

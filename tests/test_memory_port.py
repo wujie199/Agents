@@ -133,14 +133,14 @@ class TestL1HotMemory:
         assert snap.frozen is True
 
     @pytest.mark.asyncio
-    async def test_apply_delta_changes_hash(self, memory):
+    async def test_frozen_snapshot_stable_after_delta(self, memory):
         ctx = _ctx()
         before = memory.compose_prompt_snapshot(ctx).hash
         await memory.apply_memory_delta(
             ctx, MemoryDelta(key="称呼", value="小明", source="user")
         )
         after = memory.compose_prompt_snapshot(ctx).hash
-        assert before != after
+        assert before == after
 
     @pytest.mark.asyncio
     async def test_finalize_merges_pending_and_l4(self, memory):

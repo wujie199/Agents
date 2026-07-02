@@ -16,7 +16,7 @@ from document.rag.config import MetadataConfig, RagPipelineConfig
 
 @pytest.fixture
 def rules_path():
-    return str(Path("config") / "metadata_tagging.yml")
+    return str(Path("config") / "rag.yml")
 
 
 def test_load_rules(rules_path):

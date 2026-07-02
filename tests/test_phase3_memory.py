@@ -27,19 +27,22 @@ from agent_platform.memory.adapters.http_external_memory_adapter import (
 )
 
 
-def test_dev_skills_and_l4_http_configs_exist():
-    for name in (
-        "memory.dev-skills.example.yml",
-        "memory.dev-l4-http.example.yml",
-    ):
-        path = Path("config") / name
-        assert path.is_file(), name
+from agent_platform.memory.adapters.config_loader import load_memory_config
 
 
-def test_dev_skills_auto_extract_enabled():
-    cfg = yaml.safe_load(
-        Path("config/memory.dev-skills.example.yml").read_text(encoding="utf-8")
-    )
+def test_memory_profiles_defined_in_yml():
+    import yaml
+    from pathlib import Path
+
+    raw = yaml.safe_load(Path("config/memory.yml").read_text(encoding="utf-8"))
+    profiles = raw.get("profiles") or {}
+    assert "skills" in profiles
+    assert "l4_http" in profiles
+
+
+def test_skills_profile_auto_extract(monkeypatch):
+    monkeypatch.setenv("MEMORY_PROFILE", "skills")
+    cfg = load_memory_config("config/memory.yml")
     assert cfg.get("skill_auto_extract_draft") is True
 
 

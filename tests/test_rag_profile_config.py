@@ -17,9 +17,9 @@ CONFIG_DIR = str(REPO_ROOT / "config")
 
 def test_resolve_profile_paths():
     faq_path = resolve_rag_pipeline_config_path(CONFIG_DIR, profile="faq")
-    assert faq_path.endswith("rag_pipeline.faq.yml")
+    assert faq_path.endswith("rag.faq.yml")
     contract_path = resolve_rag_pipeline_config_path(CONFIG_DIR, profile="contract")
-    assert contract_path.endswith("rag_pipeline.contract.yml")
+    assert contract_path.endswith("rag.contract.yml")
 
 
 def test_detect_rag_profile_for_path():

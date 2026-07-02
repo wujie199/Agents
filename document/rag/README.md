@@ -22,8 +22,10 @@ document/rag/
 ## 生产配置
 
 ```bash
-# 指定完整 YAML 路径（优先级高于默认 config/rag_pipeline.yml）
-export RAG_PIPELINE_CONFIG=config/rag_pipeline.production.example.yml
+# 指定完整 YAML 路径（优先级高于默认 config/rag.yml）
+export RAG_CONFIG=config/rag.production.example.yml
+# 兼容旧变量名
+export RAG_PIPELINE_CONFIG=config/rag.production.example.yml
 
 # 或使用 CLI / Web 内置 profile（见下方「按文档类型 profile」）
 export RAG_EMBEDDING_MODEL_PATH=/opt/models/embedding/bge-small-zh-v1.5
@@ -32,14 +34,14 @@ export OCR_MODEL_ROOT=/opt/models/ocr
 export RAG_USE_MOCK_RERANK_FALLBACK=false
 ```
 
-生产示例关闭 mock rerank、开启 `enable_router`；dev 默认 `config/rag_pipeline.yml`。
+生产示例关闭 mock rerank、开启 `enable_router`；dev 默认 `config/rag.yml`。
 
 ## 按文档类型 profile
 
 | profile | 配置文件 | 适用 |
 |---------|----------|------|
-| `faq` | `config/rag_pipeline.faq.yml` | 纯 FAQ PDF（faq 切块、OCR 后处理、hybrid+rerank） |
-| `contract` | `config/rag_pipeline.contract.yml` | Word 合同（article 切块、legal+privacy 清洗） |
+| `faq` | `config/rag.faq.yml` | 纯 FAQ PDF（faq 切块、OCR 后处理、hybrid+rerank） |
+| `contract` | `config/rag.contract.yml` | Word 合同（article 切块、legal+privacy 清洗） |
 
 ```bash
 # FAQ PDF
@@ -50,18 +52,18 @@ python document/build_rag_index.py --profile contract contract.docx --glob "*.do
 ```
 
 Web 上传 (`app/web/app.py`) 按扩展名自动选择：`.pdf` → `faq`，`.docx`/`.doc` → `contract`。
-未指定 `--profile` 时 CLI 仍使用 `RAG_PIPELINE_CONFIG` 或默认 `config/rag_pipeline.yml`。
+未指定 `--profile` 时 CLI 仍使用 `RAG_CONFIG` / `RAG_PIPELINE_CONFIG` 或默认 `config/rag.yml`。
 
 ## 替换适配器
 
-编辑 `config/rag_pipeline.yml`，实现类在 `adapters/registry.py` 注册：
+编辑 `config/rag.yml`，实现类在 `adapters/registry.py` 注册：
 
 | 能力 | 配置键 | 默认 backend |
 |------|--------|----------------|
 | 摄取 | `ingest.mode` | `ocr_only` |
 | 向量 | `embedding.backend` | `local_bge` |
 | 重排 | `rerank.backend` | `local_bge` |
-| 元数据打标 | `metadata.backend` | `rule_keyword`（规则见 `config/metadata_tagging.yml`） |
+| 元数据打标 | `metadata.backend` | `rule_keyword`（规则见 `config/rag.yml` → `metadata.rules`） |
 
 ## 业务入口
 
@@ -94,7 +96,7 @@ python document/build_rag_index.py --rebuild-bm25 --data-dir data/rag_offline
 # 单次查询
 python document/query_rag.py "扫地机器人如何回充"
 
-# 按场景过滤（单库 agent + metadata.tags，见 config/scenarios.yml）
+# 按场景过滤（单库 agent + metadata.tags，见 config/rag.yml → scenarios）
 python document/query_rag.py "退租流程" --scenario customer_service
 
 # 直接指定标签（可与 --scenario 叠加）
@@ -107,9 +109,9 @@ python document/build_rag_index.py document/rag/pdf --tag 产品 --tag 营销
 python document/query_rag.py
 ```
 
-**单库多场景**：所有文档写入同一 Chroma collection（默认 `agent`），通过 chunk metadata 的 `tags` 区分领域。建库时由 `config/metadata_tagging.yml` 规则打标，也可用 `--tag` 手动追加；检索时用 `--scenario` 或 `--tag` 在召回后过滤（向量/BM25 会过采样再过滤）。
+**单库多场景**：所有文档写入同一 Chroma collection（默认 `agent`），通过 chunk metadata 的 `tags` 区分领域。建库时由 `config/rag.yml` → `metadata.rules` 规则打标，也可用 `--tag` 手动追加；检索时用 `--scenario` 或 `--tag` 在召回后过滤（向量/BM25 会过采样再过滤）。
 
-配置见 `config/rag_pipeline.yml` → `retrieval`（`enable_hybrid`、`hybrid_weights`、`fusion_strategy`、`rerank_min_score`）。
+配置见 `config/rag.yml` → `retrieval`（`enable_hybrid`、`hybrid_weights`、`fusion_strategy`、`rerank_min_score`）。
 Rerank 后仅保留分数 **大于** `rerank_min_score`（默认 0.8）的结果；关闭过滤可设 `rerank_min_score: null`。
 BM25 索引路径：`data/rag_offline/bm25_index/{collection}.json`，建库时与 Chroma 同步写入。
 

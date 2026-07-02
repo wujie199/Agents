@@ -14,6 +14,7 @@ from app.agents.orchestration.chat_nodes import fetch_turn_history
 from app.agents.debug.debug_trace import agent_debug
 from app.agents.memory.conflict_detector import (
     check_l1_write_conflicts,
+    ConflictRecord,
     ConflictStrategy,
 )
 
@@ -49,7 +50,7 @@ async def enrich_l1_before_finalize(
     except Exception:
         pass
 
-    conflict_strategy = ConflictStrategy(cfg.l1_conflict_strategy)
+    conflict_strategy: ConflictStrategy = cfg.l1_conflict_strategy  # type: ignore[assignment]
     conflict_records = check_l1_write_conflicts(
         existing_facts,
         [{"key": f["key"], "value": f.get("value") or ""} for f in facts],

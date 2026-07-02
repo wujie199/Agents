@@ -73,6 +73,11 @@ from app.agents.orchestration.chat_service import (
 )
 from app.agents.orchestration.chat_langgraph import create_chat_langgraph_session_async
 from app.agents.roles.react_loop import end_agent_session
+from app.web.observability_panel import (
+    begin_turn_observability,
+    collect_turn_observability,
+    format_observability_markdown,
+)
 
 # ── RAG 建库（懒加载，仅在上传文件时才 import） ──
 
@@ -213,6 +218,29 @@ def _format_retrieval_markdown(
     if mem_md:
         parts.append(mem_md)
     return "\n".join(parts)
+
+
+def _format_sidebar_markdown(
+    evidences: list[dict],
+    memory_summary: dict | None,
+    *,
+    perf_waterfall: str = "",
+    observability_md: str = "",
+) -> str:
+    """检索结果 + 性能 + 运行监控（同屏）。"""
+    base = _format_retrieval_markdown(evidences, memory_summary)
+    return base + (perf_waterfall or "") + (observability_md or "")
+
+
+def _collect_web_observability_md(
+    handle: ChatSessionHandle,
+    session_id: str,
+) -> str:
+    try:
+        snap = collect_turn_observability(handle.run_ctx, session_id)
+        return format_observability_markdown(snap)
+    except Exception:
+        return ""
 
 
 # ══════════════════════════════════════════════════════════
@@ -414,6 +442,10 @@ async def chat_stream(
     t_session_start = time.perf_counter()
     handle = await _get_or_create_session(tenant_id, user_id, session_id)
     t_session_ms = (time.perf_counter() - t_session_start) * 1000
+    begin_turn_observability(handle.run_ctx)
+    req = handle.run_ctx.request
+    if req is not None and not getattr(req, "trace_id", None):
+        req.trace_id = f"web-{session_id}"
 
     # 会话就绪，通知前端
     yield json.dumps({"type": "status", "text": "🔍 会话就绪，检索知识库..."}, ensure_ascii=False), ""
@@ -601,7 +633,15 @@ async def chat_stream(
             for s in _perf_stages
         ],
     }
-    yield json.dumps(perf_data, ensure_ascii=False), _format_retrieval_markdown(evidences_summary, memory_summary)
+    obs_md = _collect_web_observability_md(handle, session_id)
+    perf_waterfall = _format_perf_waterfall(perf_data)
+    sidebar = _format_sidebar_markdown(
+        evidences_summary,
+        memory_summary,
+        perf_waterfall=perf_waterfall,
+        observability_md=obs_md,
+    )
+    yield json.dumps(perf_data, ensure_ascii=False), sidebar
 
 
 # ══════════════════════════════════════════════════════════
@@ -861,14 +901,11 @@ def build_ui() -> gr.Blocks:
                         except (json.JSONDecodeError, KeyError):
                             pass
                         continue
-                    # 处理 perf 事件：渲染 waterfall 并追加到检索结果（记忆组件之后）
+                    # 处理 perf 事件：sidebar 已含性能 waterfall + 运行监控
                     if text.startswith('{"type":"perf"') or text.startswith('{"type": "perf"'):
                         try:
-                            perf_event = json.loads(text)
-                            perf_waterfall = _format_perf_waterfall(perf_event)
-                            # 将性能面板追加到 rag_result 尾部（记忆组件之后）
-                            combined_rag_md = rag_md + perf_waterfall if perf_waterfall else rag_md
-                            yield partial_history, "", combined_rag_md
+                            json.loads(text)  # 校验 JSON
+                            yield partial_history, "", rag_md
                         except (json.JSONDecodeError, KeyError):
                             pass
                         continue

@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 from app.agents.middleware import Middleware
 from app.agents.middleware.compose import wrap_node, compose_middlewares
 from app.agents.middleware.tracing import TracingMiddleware
+from app.agents.middleware.request_context import RequestContextMiddleware
+from app.agents.middleware.metrics import MetricsMiddleware
 from app.agents.middleware.logging import LoggingMiddleware
 from app.agents.middleware.policy import PolicyMiddleware
 from app.agents.middleware.privacy import PrivacyMiddleware
@@ -116,6 +118,99 @@ class TestTracingMiddleware:
         ctx = await mw.on_enter("test_node", {}, {})
         assert ctx["trace_id"]
         assert len(ctx["trace_id"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_on_enter_starts_observability_span(self):
+        from agent_platform.infrastructure.observability.adapter import (
+            ObservabilityPortAdapter,
+        )
+        from core.domain.context import RequestContext
+        from core.composition.run_context import RunContext
+
+        obs = ObservabilityPortAdapter(service_name="test-tracing")
+        run_ctx = RunContext(
+            request=RequestContext(
+                tenant_id="t",
+                user_id="u",
+                session_id="s",
+                trace_id="tr-1",
+                channel="test",
+            ),
+            observability=obs,
+        )
+        config = {"configurable": {"trace_id": "tr-1", "run_ctx": run_ctx}}
+        mw = TracingMiddleware()
+        ctx = await mw.on_enter("prepare", {}, config)
+        await mw.on_exit(
+            "prepare", {}, config, {"ok": True}, extra=ctx
+        )
+        assert len(obs._spans) == 1
+        span = list(obs._spans.values())[0]
+        assert span.name == "graph.prepare"
+        assert span.end_time is not None
+
+
+class TestRequestContextMiddleware:
+    @pytest.mark.asyncio
+    async def test_propagates_trace_id_from_config(self):
+        mw = RequestContextMiddleware()
+        config = {"configurable": {"trace_id": "req-123"}}
+        ctx = await mw.on_enter("prepare", {}, config)
+        assert ctx["trace_id"] == "req-123"
+        assert config["configurable"]["trace_id"] == "req-123"
+
+    @pytest.mark.asyncio
+    async def test_injects_identity_attributes(self):
+        mw = RequestContextMiddleware()
+        run_ctx = MagicMockRunCtx("tenant-a")
+        run_ctx.request = type(
+            "R",
+            (),
+            {
+                "tenant_id": "tenant-a",
+                "user_id": "user-b",
+                "session_id": "sess-c",
+                "trace_id": "tr",
+            },
+        )()
+        config = {"configurable": {"run_ctx": run_ctx}}
+        ctx = await mw.on_enter("agent", {}, config)
+        assert ctx["span_attributes"]["tenant_id"] == "tenant-a"
+        assert ctx["span_attributes"]["user_id"] == "user-b"
+        assert ctx["span_attributes"]["session_id"] == "sess-c"
+
+
+class TestMetricsMiddleware:
+    @pytest.mark.asyncio
+    async def test_records_graph_node_duration(self):
+        from agent_platform.infrastructure.observability.adapter import (
+            ObservabilityPortAdapter,
+        )
+        from core.domain.context import RequestContext
+        from core.composition.run_context import RunContext
+
+        obs = ObservabilityPortAdapter(service_name="test-metrics")
+        run_ctx = RunContext(
+            request=RequestContext(
+                tenant_id="t-metrics",
+                user_id="u",
+                session_id="s",
+                trace_id="tr",
+                channel="test",
+            ),
+            observability=obs,
+        )
+        mw = MetricsMiddleware(node_thresholds={"prepare": 10})
+        enter_ctx = await mw.on_enter("prepare", {}, {"configurable": {"run_ctx": run_ctx}})
+        await mw.on_exit(
+            "prepare",
+            {},
+            {"configurable": {"run_ctx": run_ctx}},
+            {"ok": True},
+            extra=enter_ctx,
+        )
+        metrics = obs.get_metrics()
+        assert "graph.node.duration_ms" in metrics
 
 
 class TestLoggingMiddleware:

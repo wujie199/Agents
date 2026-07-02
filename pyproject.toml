@@ -27,6 +27,11 @@ api = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
 ]
+observability = [
+  "opentelemetry-api>=1.20",
+  "opentelemetry-sdk>=1.20",
+  "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 eval = [
   "ragas>=0.2.8",
   "datasets",

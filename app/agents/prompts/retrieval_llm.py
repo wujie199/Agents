@@ -10,6 +10,7 @@ from typing import Any, Tuple
 
 from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.roles.retrieval_router import Intent, classify_intent
+from document.rag.application.retrieval.rewrite.llm_invoke import invoke_llm_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,7 @@ async def classify_intent_llm(
     try:
         llm = models.get_model(cfg.retrieval_router_role)
         prompt = _PROMPT.format(query=q[:500])
-        if hasattr(llm, "ainvoke"):
-            resp = await llm.ainvoke(prompt)
-        else:
-            resp = llm.invoke(prompt)
-        text = resp if isinstance(resp, str) else getattr(resp, "content", str(resp))
+        text = await invoke_llm_prompt(llm, prompt)
         data = _parse_json(text)
         intent = str(data.get("intent", "")).lower()
         confidence = float(data.get("confidence", 0.0))

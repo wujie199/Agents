@@ -151,6 +151,86 @@ async def test_log_writes_when_enabled(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_memory_runtime_status_hermes_layers(tmp_path, monkeypatch):
+    from agent_platform.memory.adapters.hot_memory_file_adapter import HotMemoryFileAdapter
+
+    store = tmp_path / "mem"
+    hot = HotMemoryFileAdapter(store_dir=str(store), use_file_lock=False)
+    user_path = store / "t1" / "USER_u1.md"
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text("称呼: 测试\n", encoding="utf-8")
+
+    class _Mem:
+        _hot = hot
+        _external = None
+
+        def compose_prompt_snapshot(self, req):
+            return hot.compose_snapshot(req)
+
+        async def list_turns(self, req, limit=10):
+            return [{"role": "user", "content": "hi", "ts": "now"}]
+
+        def get_last_session_search_stats(self, req):
+            return {"mode": "discovery", "hit": True, "chars": 42}
+
+    ctx = RunContext(
+        request=RequestContext(
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+            trace_id="tr",
+            channel="test",
+        ),
+        memory=_Mem(),
+        extra={
+            "_l0_compress_count": 2,
+            "_last_llm_prompt_tokens": 900,
+            "_l0_context_state": {"savings_pct": 0.15},
+        },
+    )
+    data = await collect_memory_runtime_status(ctx, event="hermes_layers")
+    l0 = data["layers"]["L0"]
+    assert l0["compress_count"] == 2
+    assert l0["prompt_tokens"] == 900
+    assert l0["state_present"] is True
+    assert l0["last_savings_pct"] == 15.0
+    l2 = data["layers"]["L2"]
+    assert l2["last_search"]["mode"] == "discovery"
+
+
+def test_format_detailed_includes_l0_section():
+    from app.agents.memory.memory_runtime_debug import format_memory_runtime_detailed
+
+    data = {
+        "event": "test",
+        "request": {"session_id": "s1", "tenant_id": "t1", "user_id": "u1"},
+        "layers": {
+            "L0": {
+                "enabled": True,
+                "prompt_tokens": 100,
+                "compress_count": 1,
+                "last_savings_pct": 12.5,
+                "state_present": True,
+            },
+            "L1": {"hash": "abc", "chars": 10, "backend": "file"},
+            "L2": {"archive_backend": "sqlite", "session_turn_rows": 2},
+            "L3": {"published_count": 1},
+            "L4": {
+                "provider": "FileExternalMemoryAdapter",
+                "available": True,
+                "circuit_breaker_state": "closed",
+            },
+        },
+        "infrastructure": {},
+        "rag": {"port_present": True},
+    }
+    text = format_memory_runtime_detailed(data)
+    assert "L0 上下文压缩" in text
+    assert "compress_count=1" in text
+    assert "provider=FileExternalMemoryAdapter" in text
+
+
+@pytest.mark.asyncio
 async def test_log_force_without_enabled(tmp_path, monkeypatch):
     log_file = tmp_path / "mem-force.log"
     monkeypatch.setenv("MEMORY_DEBUG_LOG", str(log_file))

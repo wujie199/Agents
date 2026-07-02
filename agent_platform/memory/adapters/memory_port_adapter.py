@@ -23,6 +23,15 @@ from agent_platform.memory.adapters.hot_memory_compressor_adapter import (
     TruncatingHotMemoryCompressorAdapter,
 )
 from agent_platform.memory.adapters.hot_memory_file_adapter import HotMemoryFileAdapter
+from agent_platform.memory.adapters.l1_memory_callbacks import (
+    OnMemoryWriteCallback,
+    build_on_memory_write_callback,
+)
+from agent_platform.memory.adapters.l1_memory_store import L1MemoryStore
+from agent_platform.memory.adapters.l2_session_search import (
+    SessionSearchMode,
+    run_session_search_mode,
+)
 from agent_platform.memory.adapters.noop_external_adapter import (
     NoOpExternalMemoryAdapter,
 )
@@ -94,6 +103,12 @@ class MemoryPortAdapter:
         purge_tenant_l4_strip_user_keys: bool = True,
         time_decay: bool = True,
         time_decay_half_life_days: float = 90.0,
+        l1_hermes_entries: bool = True,
+        l1_write_approval: bool = False,
+        l1_nudge_interval: int = 10,
+        l1_store: Optional[L1MemoryStore] = None,
+        on_memory_write: Optional[OnMemoryWriteCallback] = None,
+        l2_compression_continuation: str = "split",
     ):
         self._archive_db = archive_db
         self._index_port = index_port
@@ -129,6 +144,25 @@ class MemoryPortAdapter:
             hot_memory_max_chars=hot_memory_max_chars,
             user_memory_max_chars=user_memory_max_chars,
         )
+        self._l1_hermes = l1_hermes_entries
+        self._l1_write_approval = l1_write_approval
+        self._l1_nudge_interval = l1_nudge_interval
+        self._l2_compression_continuation = l2_compression_continuation
+        self._on_memory_write = on_memory_write or build_on_memory_write_callback(
+            external_memory
+        )
+        self._l1 = l1_store
+        if self._l1_hermes and self._l1 is None:
+            self._l1 = L1MemoryStore(
+                store_dir=store_dir,
+                memory_char_limit=hot_memory_max_chars,
+                user_char_limit=user_memory_max_chars,
+                use_file_lock=self._hot._use_file_lock,
+                on_memory_write=self._on_memory_write,
+                hot_adapter=self._hot,
+            )
+        self._frozen_snapshots: dict[str, PromptMemorySnapshot] = {}
+        self._last_session_search_stats: dict[str, dict[str, Any]] = {}
         self._cold_archive = None
         if enable_cold_archive and object_store is not None and archive_db is not None:
             from agent_platform.memory.adapters.session_cold_archive_service import (
@@ -184,10 +218,75 @@ class MemoryPortAdapter:
             reset()
         await self.reindex_session_vectors(batch_size=self._reindex_batch_size)
 
+    def _session_snapshot_key(self, context: RequestContext) -> str:
+        return f"{context.tenant_id}:{context.user_id}:{context.session_id}"
+
+    def _record_session_search_stat(
+        self,
+        context: RequestContext,
+        *,
+        query: str,
+        mode: str,
+        hit: bool,
+        chars: int = 0,
+        cached: bool = False,
+    ) -> None:
+        self._last_session_search_stats[self._session_snapshot_key(context)] = {
+            "query_preview": (query or "")[:80],
+            "mode": mode,
+            "hit": hit,
+            "chars": chars,
+            "cached": cached,
+        }
+
+    def get_last_session_search_stats(
+        self, context: RequestContext
+    ) -> Optional[dict[str, Any]]:
+        return self._last_session_search_stats.get(
+            self._session_snapshot_key(context)
+        )
+
     def compose_prompt_snapshot(
         self, context: RequestContext
     ) -> PromptMemorySnapshot:
+        if self._l1 is not None:
+            key = self._session_snapshot_key(context)
+            cached = self._frozen_snapshots.get(key)
+            if cached is not None:
+                return cached
+            snap = self._l1.capture_frozen_snapshot(context)
+            self._frozen_snapshots[key] = snap
+            self._hot._snapshot_hash[
+                f"{context.tenant_id}:{context.user_id}"
+            ] = snap.hash
+            return snap
         return self._hot.compose_snapshot(context)
+
+    def invoke_memory_tool(
+        self,
+        context: RequestContext,
+        *,
+        action: str = "",
+        target: str = "memory",
+        content: str | None = None,
+        old_text: str | None = None,
+        operations: list[dict] | None = None,
+    ) -> dict:
+        if self._l1 is None:
+            return {"success": False, "error": "L1 Hermes memory not enabled."}
+        return self._l1.invoke_memory_tool(
+            context,
+            action=action,
+            target=target,
+            content=content,
+            old_text=old_text,
+            operations=operations,
+            write_approval=self._l1_write_approval,
+        )
+
+    @property
+    def l1_nudge_interval(self) -> int:
+        return self._l1_nudge_interval
 
     async def ensure_session(self, context: RequestContext) -> None:
         if self._archive_db is None:
@@ -204,6 +303,14 @@ class MemoryPortAdapter:
         )
 
     async def finalize_session(self, context: RequestContext) -> dict:
+        memory_tool_applied = 0
+        if self._l1 is not None:
+            results = self._l1.flush_pending_memory_ops(
+                context.tenant_id, context.user_id
+            )
+            memory_tool_applied = sum(
+                1 for r in results if r.get("success")
+            )
         pending = self._hot.flush_pending_deltas(
             context.tenant_id, context.user_id
         )
@@ -230,10 +337,18 @@ class MemoryPortAdapter:
 
         self._hot.invalidate_cache(context.tenant_id, context.user_id)
         await self._invalidate_session_search_cache(context, reason="finalize")
+        self._frozen_snapshots.pop(self._session_snapshot_key(context), None)
+        skill_end: dict = {}
+        if self._skill_memory is not None:
+            on_end = getattr(self._skill_memory, "on_session_end", None)
+            if callable(on_end):
+                skill_end = await on_end(context)
         return {
             "pending_applied": len(pending),
+            "memory_tool_applied": memory_tool_applied,
             "l4_merged": len(l4_changes),
             "l4_keys": [str(c.get("key") or "") for c in l4_changes if c.get("key")],
+            "skill_auto_extract": skill_end,
         }
 
     async def refresh_external_profile(
@@ -312,7 +427,10 @@ class MemoryPortAdapter:
         if self._privacy:
             record = self._privacy.redact_for_storage(record)
 
-        await self._archive_db.insert_message(record)
+        inserter = getattr(self._archive_db, "append_message", None)
+        if inserter is None:
+            inserter = self._archive_db.insert_message
+        await inserter(record)
         if self._vector_index is not None:
             try:
                 await self._vector_index.index_message(
@@ -870,6 +988,60 @@ class MemoryPortAdapter:
             sources=sources,
         )
 
+    async def append_message(
+        self, context: RequestContext, turn: TurnRecord
+    ) -> None:
+        """Hermes L2：每轮 append_message（persist_turn 别名）。"""
+        await self.persist_turn(context, turn)
+
+    async def split_session_on_compression(
+        self, context: RequestContext, new_session_id: str
+    ) -> dict:
+        if self._archive_db is None:
+            return {"success": False, "error": "archive_db_not_configured"}
+        if self._l2_compression_continuation != "split":
+            return {"success": True, "mode": "inplace", "session_id": context.session_id}
+        creator = getattr(self._archive_db, "create_compression_child_session", None)
+        if creator is None:
+            return {"success": False, "error": "compression_split_not_supported"}
+        result = await creator(
+            context.session_id,
+            new_session_id=new_session_id,
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            channel=context.channel,
+        )
+        await self._invalidate_session_search_cache(context, reason="compression_split")
+        return {"success": True, "mode": "split", **result}
+
+    async def session_search_hermes(
+        self,
+        context: RequestContext,
+        *,
+        mode: SessionSearchMode,
+        query: str = "",
+        limit: int = 3,
+        sort: str = "newest",
+        around_message_id: str = "",
+        before: int = 5,
+        after: int = 5,
+        session_link: str = "",
+    ) -> str:
+        if self._archive_db is None:
+            return '{"error":"Archive search not available"}'
+        return await run_session_search_mode(
+            self._archive_db,
+            mode=mode,
+            context=context,
+            query=query,
+            limit=limit,
+            sort=sort,
+            around_message_id=around_message_id,
+            before=before,
+            after=after,
+            session_link=session_link,
+        )
+
     async def session_search(
         self,
         query: str,
@@ -879,7 +1051,56 @@ class MemoryPortAdapter:
         *,
         use_llm_summary: bool | None = None,
         prefer_user_role: bool = False,
+        mode: Optional[str] = None,
+        sort: str = "newest",
+        around_message_id: str = "",
+        before: int = 5,
+        after: int = 5,
+        session_link: str = "",
     ) -> str:
+        hermes_mode = (mode or "").strip().lower()
+        if hermes_mode in ("discovery", "scroll", "read", "browse"):
+            payload = await self.session_search_hermes(
+                context,
+                mode=hermes_mode,  # type: ignore[arg-type]
+                query=query,
+                limit=limit,
+                sort=sort,
+                around_message_id=around_message_id,
+                before=before,
+                after=after,
+                session_link=session_link,
+            )
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                self._record_session_search_stat(
+                    context,
+                    query=query,
+                    mode=hermes_mode,
+                    hit=bool(payload and payload.strip()),
+                    chars=len(payload or ""),
+                )
+                return payload
+            if hermes_mode == "discovery" and data.get("narrative"):
+                text = str(data["narrative"])
+                self._record_session_search_stat(
+                    context,
+                    query=query,
+                    mode=hermes_mode,
+                    hit=bool(text.strip()),
+                    chars=len(text),
+                )
+                return text
+            self._record_session_search_stat(
+                context,
+                query=query,
+                mode=hermes_mode,
+                hit=bool(payload and payload.strip()),
+                chars=len(payload or ""),
+            )
+            return payload
+
         if self._archive_db is None:
             return "Archive search not available"
 
@@ -894,7 +1115,22 @@ class MemoryPortAdapter:
         cached = await self._cache_get(cache_key)
         if cached is not None:
             if cached == SESSION_SEARCH_EMPTY_SENTINEL:
+                self._record_session_search_stat(
+                    context,
+                    query=query,
+                    mode=str(scope),
+                    hit=False,
+                    cached=True,
+                )
                 return ""
+            self._record_session_search_stat(
+                context,
+                query=query,
+                mode=str(scope),
+                hit=bool(cached and str(cached).strip()),
+                chars=len(str(cached or "")),
+                cached=True,
+            )
             return cached
 
         try:
@@ -913,8 +1149,21 @@ class MemoryPortAdapter:
                         SESSION_SEARCH_EMPTY_SENTINEL,
                         ttl_seconds=self._session_search_negative_cache_ttl,
                     )
+                self._record_session_search_stat(
+                    context,
+                    query=query,
+                    mode=str(scope),
+                    hit=False,
+                )
                 return ""
             await self._cache_set(cache_key, detail.summary)
+            self._record_session_search_stat(
+                context,
+                query=query,
+                mode=str(scope),
+                hit=bool(detail.summary and detail.summary.strip()),
+                chars=len(detail.summary or ""),
+            )
             return detail.summary
         except Exception as e:
             self._logger.error("Session search failed: %s", e)

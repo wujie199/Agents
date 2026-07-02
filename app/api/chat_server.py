@@ -29,8 +29,16 @@ from core.domain.context import RequestContext
 from agent_platform.infrastructure.observability.adapter import (
     ObservabilityPortAdapter,
 )
+from agent_platform.infrastructure.observability.otel_adapter import (
+    build_observability_port,
+)
 
-from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
+from app.agents.orchestration.chat_config import (
+    ChatAgentConfig,
+    load_chat_config,
+    load_observability_config,
+)
+from app.agents.observability.trace_context import resolve_trace_id
 from app.agents.orchestration.chat_service import (
     ChatSessionHandle,
     execute_chat_turn,
@@ -50,7 +58,7 @@ from app.agents.memory.memory_bootstrap import bootstrap_memory_runtime
 from app.agents.roles.react_loop import end_agent_session
 
 try:
-    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException, Request
     from fastapi.responses import PlainTextResponse, StreamingResponse
     from pydantic import BaseModel, Field
 
@@ -112,7 +120,7 @@ class ChatSessionRegistry:
     profile: ChatProfile = "dev"
     enable_memory_tools: bool = True
     observability: ObservabilityPortAdapter = field(
-        default_factory=lambda: ObservabilityPortAdapter(service_name="agents-chat-api")
+        default_factory=lambda: build_observability_port(service_name="agents-chat")
     )
     _sessions: Dict[str, ChatSessionHandle] = field(default_factory=dict)
     _global_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -212,6 +220,7 @@ def create_app(
         data_dir=data_dir,
         profile=profile,
     )
+    obs_cfg = load_observability_config(config_dir, profile=profile)
     rate_limiter = create_chat_rate_limiter(config_dir)
     auth_dep = [Depends(verify_api_key)] if verify_api_key else []
     memory_admin_dep = (
@@ -226,6 +235,25 @@ def create_app(
         allowed, reason = rate_limiter.check(tenant_id, user_id)
         if not allowed:
             raise HTTPException(status_code=429, detail=reason or "请求过于频繁")
+
+    def _apply_http_trace(
+        handle: ChatSessionHandle,
+        *,
+        header_value: Optional[str] = None,
+        traceparent: Optional[str] = None,
+        body_trace_id: Optional[str] = None,
+    ) -> str:
+        trace_id = resolve_trace_id(
+            header_value=header_value,
+            traceparent=traceparent,
+            body_trace_id=body_trace_id,
+            fallback=getattr(handle.run_ctx.request, "trace_id", None),
+        )
+        handle.run_ctx = replace(
+            handle.run_ctx,
+            request=replace(handle.run_ctx.request, trace_id=trace_id),
+        )
+        return trace_id
 
     from app.api.health_checks import run_health_checks
 
@@ -298,7 +326,10 @@ def create_app(
         return await get_l1_snapshot(handle)
 
     @app.post("/v1/chat/turn", response_model=ChatTurnResponse, dependencies=auth_dep)
-    async def chat_turn(body: ChatTurnRequest) -> ChatTurnResponse:
+    async def chat_turn(
+        body: ChatTurnRequest,
+        request: Request,
+    ) -> ChatTurnResponse:
         if not body.message.strip():
             raise HTTPException(status_code=400, detail="message 不能为空")
         _enforce_rate_limit(body.tenant_id, body.user_id)
@@ -309,6 +340,13 @@ def create_app(
             body.session_id,
             engine=body.engine,
         )
+        if obs_cfg.enabled:
+            _apply_http_trace(
+                handle,
+                header_value=request.headers.get(obs_cfg.trace_header),
+                traceparent=request.headers.get("traceparent"),
+                body_trace_id=body.trace_id,
+            )
         async with handle.lock:
             result = await execute_chat_turn(
                 handle,
@@ -325,7 +363,10 @@ def create_app(
         )
 
     @app.post("/v1/chat/turn/stream", dependencies=auth_dep)
-    async def chat_turn_stream(body: ChatTurnRequest) -> StreamingResponse:
+    async def chat_turn_stream(
+        body: ChatTurnRequest,
+        request: Request,
+    ) -> StreamingResponse:
         if not body.message.strip():
             raise HTTPException(status_code=400, detail="message 不能为空")
         _enforce_rate_limit(body.tenant_id, body.user_id)
@@ -336,6 +377,13 @@ def create_app(
             body.session_id,
             engine=body.engine,
         )
+        if obs_cfg.enabled:
+            _apply_http_trace(
+                handle,
+                header_value=request.headers.get(obs_cfg.trace_header),
+                traceparent=request.headers.get("traceparent"),
+                body_trace_id=body.trace_id,
+            )
 
         async def event_stream():
             async with handle.lock:

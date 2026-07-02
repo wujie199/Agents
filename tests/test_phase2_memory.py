@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 
 from core.domain.context import RequestContext
 from core.composition.run_context import RunContext
@@ -15,12 +14,15 @@ from app.agents.memory.enterprise_memory import list_user_sessions_enriched
 from app.agents.memory.memory_metrics import record_turn_decision
 
 
-def test_dev_cold_example_config():
-    path = Path("config/memory.dev-cold.example.yml")
-    assert path.is_file()
-    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+from agent_platform.memory.adapters.config_loader import load_memory_config
+
+
+def test_cold_profile_in_memory_yml(monkeypatch):
+    monkeypatch.setenv("MEMORY_PROFILE", "cold")
+    cfg = load_memory_config("config/memory.yml")
     assert cfg.get("enable_cold_archive") is True
     assert cfg.get("session_search_cold_fallback") is True
+    assert cfg.get("enable_session_vector_index") is False
 
 
 @pytest.mark.asyncio

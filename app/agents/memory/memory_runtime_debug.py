@@ -512,6 +512,118 @@ def _embedding_backend_label(ctx: RunContext, cfg: dict[str, Any]) -> str:
     return str(cfg.get("embedding_role", "embedding"))
 
 
+def _collect_l0_status(ctx: RunContext, cfg: dict[str, Any]) -> dict[str, Any]:
+    extra = ctx.extra or {}
+    state = extra.get("_l0_context_state")
+    compressor = extra.get("context_compressor")
+    last_savings = None
+    if compressor is not None:
+        last_savings = getattr(compressor, "last_savings_pct", None)
+    if last_savings is None and isinstance(state, dict):
+        last_savings = state.get("savings_pct")
+    prompt_tokens = extra.get("_last_llm_prompt_tokens")
+    l0_cfg = extra.get("l0_config") or {}
+    return {
+        "enabled": bool(l0_cfg.get("l0_context_compress_enabled", True)),
+        "state_present": isinstance(state, dict),
+        "prompt_tokens": int(prompt_tokens) if prompt_tokens is not None else None,
+        "compress_count": int(extra.get("_l0_compress_count") or 0),
+        "last_savings_pct": round(float(last_savings) * 100, 1)
+        if last_savings is not None
+        else None,
+        "continuation": extra.get("_l0_compression_continuation"),
+        "context_window_tokens": l0_cfg.get("l0_context_window_tokens")
+        or cfg.get("l0_context_window_tokens"),
+    }
+
+
+def _collect_l1_hermes_status(memory: Any, req: Any, snap: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "frozen": bool(getattr(snap, "frozen", False)),
+    }
+    l1 = getattr(memory, "_l1", None)
+    if l1 is None:
+        return out
+    try:
+        live = l1.load_from_disk(req.tenant_id, req.user_id)
+        mem_entries = live.get("memory") or []
+        user_entries = live.get("user") or []
+        mem_chars = l1._char_count(req.tenant_id, req.user_id, "memory")
+        user_chars = l1._char_count(req.tenant_id, req.user_id, "user")
+        mem_limit = l1.memory_char_limit
+        user_limit = l1.user_char_limit
+        out.update(
+            {
+                "memory_entry_count": len(mem_entries),
+                "user_entry_count": len(user_entries),
+                "memory_usage_pct": min(
+                    100, int((mem_chars / mem_limit) * 100)
+                )
+                if mem_limit > 0
+                else 0,
+                "user_usage_pct": min(
+                    100, int((user_chars / user_limit) * 100)
+                )
+                if user_limit > 0
+                else 0,
+                "memory_chars": mem_chars,
+                "user_chars": user_chars,
+            }
+        )
+    except Exception:
+        pass
+    key_fn = getattr(memory, "_session_snapshot_key", None)
+    frozen_map = getattr(memory, "_frozen_snapshots", None)
+    if callable(key_fn) and isinstance(frozen_map, dict):
+        out["frozen_snapshot_cached"] = key_fn(req) in frozen_map
+    return out
+
+
+def _collect_l2_search_stats(memory: Any, req: Any) -> dict[str, Any]:
+    getter = getattr(memory, "get_last_session_search_stats", None)
+    if not callable(getter):
+        return {}
+    stats = getter(req)
+    return dict(stats) if isinstance(stats, dict) else {}
+
+
+def _collect_l4_provider_status(
+    memory: Any, cfg: dict[str, Any], ctx: RunContext
+) -> dict[str, Any]:
+    ext = getattr(memory, "_external", None)
+    provider = type(ext).__name__ if ext is not None else "none"
+    inner = getattr(ext, "_inner", None)
+    if inner is not None:
+        provider = type(inner).__name__
+    available = provider not in ("NoOpExternalMemoryAdapter", "none", "NoneType")
+    cb_state = "n/a"
+    cache = (ctx.extra or {}).get("cache")
+    if cache is not None and hasattr(cache, "health"):
+        try:
+            health = cache.health()
+            if isinstance(health, dict):
+                cb_state = str(
+                    health.get("circuit_breaker_state") or cb_state
+                )
+        except Exception:
+            pass
+    if ctx.models is not None:
+        try:
+            info = ctx.models.get_model_info("main_llm")
+            if getattr(info, "circuit_open", False):
+                cb_state = "open"
+            elif cb_state == "n/a":
+                cb_state = "closed"
+        except Exception:
+            pass
+    return {
+        "provider": provider,
+        "available": available,
+        "circuit_breaker_state": cb_state,
+        "backend": cfg.get("external_profiles_backend", "file"),
+    }
+
+
 def _checkpointer_info(ctx: RunContext) -> dict[str, Any]:
     cp = ctx.checkpointer
     out: dict[str, Any] = {"relational": None, "langgraph": None}
@@ -580,6 +692,8 @@ async def collect_memory_runtime_status(
         status["layers"]["error"] = "MemoryPort 未注入"
         return status
 
+    status["layers"]["L0"] = _collect_l0_status(ctx, cfg)
+
     # L1
     try:
         snap = memory.compose_prompt_snapshot(req)
@@ -590,6 +704,7 @@ async def collect_memory_runtime_status(
             "pending_count": len(pending),
             "pending_keys": [p.get("key") for p in pending[:10]],
             **_hot_store_info(memory),
+            **_collect_l1_hermes_status(memory, req, snap),
         }
         if detailed:
             l1["memory_preview"] = _preview(snap.memory_text, 800)
@@ -608,6 +723,9 @@ async def collect_memory_runtime_status(
 
     # L2
     l2: dict[str, Any] = {**_archive_info(ctx)}
+    search_stats = _collect_l2_search_stats(memory, req)
+    if search_stats:
+        l2["last_search"] = search_stats
     turn_limit = 200 if detailed else session_turns_limit * 2
     try:
         rows = await memory.list_turns(req, limit=turn_limit)
@@ -682,6 +800,7 @@ async def collect_memory_runtime_status(
         "cache_ttl": cfg.get("external_profile_cache_ttl", 0),
         "merge_on_finalize": bool(cfg.get("external_merge_on_finalize")),
         "profiles_dir": cfg.get("external_profiles_dir"),
+        **_collect_l4_provider_status(memory, cfg, ctx),
     }
     try:
         fetcher = getattr(memory, "fetch_profile_facts", None)
@@ -815,15 +934,23 @@ def format_memory_runtime_summary(data: dict[str, Any]) -> str:
     l2 = layers.get("L2") or {}
     l3 = layers.get("L3") or {}
     l4 = layers.get("L4") or {}
+    l0 = layers.get("L0") or {}
     cfg = data.get("config") or {}
     cp = infra.get("checkpointer") or {}
     lines = [
         "--- memory runtime ---",
         f"  event={data.get('event')}  tenant={data.get('request', {}).get('tenant_id')}",
-        f"  L1: backend={l1.get('backend')} hash={l1.get('hash')} chars={l1.get('chars')} pending={l1.get('pending_count')}",
-        f"  L2: archive={l2.get('archive_backend')} turns={l2.get('session_turn_rows')} buf_pending={l2.get('turn_buffer_pending')}",
+        f"  L0: enabled={l0.get('enabled')} tokens={l0.get('prompt_tokens')} "
+        f"compress={l0.get('compress_count')} savings={l0.get('last_savings_pct')}% "
+        f"state={l0.get('state_present')}",
+        f"  L1: backend={l1.get('backend')} hash={l1.get('hash')} chars={l1.get('chars')} "
+        f"pending={l1.get('pending_count')} usage={l1.get('memory_usage_pct')}% "
+        f"entries={l1.get('memory_entry_count')}",
+        f"  L2: archive={l2.get('archive_backend')} turns={l2.get('session_turn_rows')} "
+        f"buf_pending={l2.get('turn_buffer_pending')}",
         f"  L3: skills={l3.get('published_count', '?')}",
-        f"  L4: backend={l4.get('backend')} facts={l4.get('facts_count', '?')}",
+        f"  L4: provider={l4.get('provider')} avail={l4.get('available')} "
+        f"cb={l4.get('circuit_breaker_state')} facts={l4.get('facts_count', '?')}",
         f"  infra: cold={infra.get('cold_archive')} vector={infra.get('session_vector_index')} embed={infra.get('embedding_backend')}",
         f"  checkpointer: rel={bool(cp.get('relational'))} lg={cp.get('langgraph') or cp.get('langgraph_sqlite_path')}",
         f"  config: {cfg.get('config_path') or cfg.get('memory_config')}",
@@ -850,6 +977,7 @@ def format_memory_runtime_detailed(data: dict[str, Any]) -> str:
     l2 = layers.get("L2") or {}
     l3 = layers.get("L3") or {}
     l4 = layers.get("L4") or {}
+    l0 = layers.get("L0") or {}
     cp = infra.get("checkpointer") or {}
     tb = infra.get("turn_buffer") or {}
 
@@ -858,9 +986,18 @@ def format_memory_runtime_detailed(data: dict[str, Any]) -> str:
         f"event={data.get('event')}  session={req.get('session_id')}  "
         f"tenant={req.get('tenant_id')}  user={req.get('user_id')}",
         "",
+        "── L0 上下文压缩 ──",
+        f"  enabled={l0.get('enabled')}  window={l0.get('context_window_tokens')}",
+        f"  prompt_tokens={l0.get('prompt_tokens')}  compress_count={l0.get('compress_count')}",
+        f"  last_savings={l0.get('last_savings_pct')}%  state_present={l0.get('state_present')}",
+        f"  continuation={l0.get('continuation') or '—'}",
+        "",
         "── L1 热记忆 ──",
         f"  backend={l1.get('backend')}  store={l1.get('store_dir')}",
         f"  hash={l1.get('hash')}  chars={l1.get('chars')}  pending={l1.get('pending_count')}",
+        f"  frozen={l1.get('frozen')}  cached={l1.get('frozen_snapshot_cached')}",
+        f"  memory: entries={l1.get('memory_entry_count')} usage={l1.get('memory_usage_pct')}%",
+        f"  user: entries={l1.get('user_entry_count')} usage={l1.get('user_usage_pct')}%",
     ]
     if l1.get("memory_preview"):
         lines.append(f"  preview:\n    {l1.get('memory_preview')}")
@@ -884,6 +1021,13 @@ def format_memory_runtime_detailed(data: dict[str, Any]) -> str:
         f"  turns_loaded={l2.get('session_turn_rows')}  buffer_pending={l2.get('turn_buffer_pending')}",
         f"  turn_buffer: enabled={tb.get('enabled')} flush_size={tb.get('flush_size')}",
     ])
+    last_search = l2.get("last_search") or {}
+    if last_search:
+        lines.append(
+            f"  last_search: mode={last_search.get('mode')} hit={last_search.get('hit')} "
+            f"cached={last_search.get('cached')} chars={last_search.get('chars')} "
+            f"q={last_search.get('query_preview')!r}"
+        )
     for t in (l2.get("recent_turns") or [])[-6:]:
         lines.append(
             f"    [{t.get('role')}] {t.get('chars')}ch  "
@@ -904,6 +1048,8 @@ def format_memory_runtime_detailed(data: dict[str, Any]) -> str:
     lines.extend([
         "",
         "── L4 外部画像 ──",
+        f"  provider={l4.get('provider')}  available={l4.get('available')}  "
+        f"cb={l4.get('circuit_breaker_state')}",
         f"  backend={l4.get('backend')}  dir={l4.get('profiles_dir')}  "
         f"merge_on_finalize={l4.get('merge_on_finalize')}",
         f"  facts={l4.get('facts_count', '?')}",

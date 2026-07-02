@@ -11,6 +11,9 @@ from agent_platform.infrastructure.privacy.adapter import PrivacyPortAdapter
 from agent_platform.infrastructure.identity.adapter import IdentityPortAdapter
 from agent_platform.infrastructure.policy.adapter import PolicyPortAdapter
 from agent_platform.infrastructure.observability.adapter import ObservabilityPortAdapter
+from agent_platform.infrastructure.observability.otel_adapter import (
+    build_observability_port,
+)
 
 
 @dataclass
@@ -40,5 +43,5 @@ def build_infrastructure_ports(
         privacy=PrivacyPortAdapter(),
         identity=IdentityPortAdapter(),
         policy=PolicyPortAdapter(config_path=f"{config_dir}/concurrency.yml"),
-        observability=ObservabilityPortAdapter(service_name=service_name),
+        observability=build_observability_port(service_name=service_name),
     )

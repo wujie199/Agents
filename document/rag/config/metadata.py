@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -11,3 +11,5 @@ class MetadataConfig:
     rules_path: Optional[str] = None
     max_tags: int = 32
     tag_filename: bool = True
+    rules: Optional[List[Dict[str, Any]]] = None
+    extension_tags: Optional[Dict[str, List[str]]] = None

@@ -44,14 +44,17 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**补充：L0 上下文压缩（非持久层）**
+
+- 当 prompt token 接近模型窗口阈值时，对 **Zone 3（可变 history）** 做 LLM 摘要压缩；Zone 1（静态 system）与 Zone 2（冻结 L1 前缀 + 首条 user）受 `ContextWindowManager` 保护。
+- 压缩结果以瞬态 `summary + tail` 存于 `RunContext.extra._l0_context_state`，下一回合由 `apply_l0_to_turn_messages` 注入，**不刷新 L1 快照**。
+- 超阈值时可触发 L2 session 续接：`l2_compression_continuation=split|inplace`（见 `config/memory.yml`）。
+- 配置键：`l0_context_compress_enabled`、`context_compress_threshold`、`compress_target_ratio`；窗口大小优先从 `models.yml` 按 `model_role` 解析。
+
 **补充：工作记忆（非 Hermes 独立层）**
 
 - 当前任务的槽位、意图、中间结果存放在 **LangGraph `GraphState`**，任务结束清空。
 - 对应原「工作记忆层」，不单独列为 Hermes 第五层，避免概念重叠。
-
-**补充：上下文窗口（非持久层）**
-
-- 最近 N 轮 `messages` 受模型 context 限制，由 L3 执行引擎裁剪，不写入 L2 以外的持久存储。
 
 ---
 

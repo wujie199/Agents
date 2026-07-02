@@ -51,6 +51,7 @@ def test_build_memory_tools_full_stack():
     assert names == {
         "session_search",
         "remember_user_fact",
+        "memory",
         "skill_search",
         "run_skill",
         "resolve_entity",
@@ -68,7 +69,7 @@ def test_build_memory_tools_l2_only():
         ),
     )
     names = {t.name for t in tools}
-    assert names == {"session_search", "remember_user_fact"}
+    assert names == {"session_search", "remember_user_fact", "memory"}
 
 
 @pytest.mark.asyncio

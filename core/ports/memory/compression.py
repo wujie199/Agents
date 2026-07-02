@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, List
+from typing import Protocol, List, Optional
 
 from dataclasses import dataclass
 
@@ -17,6 +17,8 @@ class CompressionResult:
     compressed_token_count: int
     savings_pct: float
     session_split: bool
+    triggered: bool = False
+    pruned_tool_results: int = 0
 
 
 class ContextCompressorPort(Protocol):
@@ -31,6 +33,8 @@ class ContextCompressorPort(Protocol):
         messages: List[dict],
         context: "core.domain.context.RequestContext",
         model_window: int,
+        *,
+        prompt_tokens: Optional[int] = None,
     ) -> CompressionResult:
         """检测 + 压缩：超过阈值时触发五阶段压缩。"""
         ...

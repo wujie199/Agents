@@ -30,6 +30,9 @@ class LangGraphRuntime:
             "run_ctx": ctx,
             "enable_rag": enable_rag,
         }
+        trace_id = getattr(ctx.request, "trace_id", None)
+        if trace_id:
+            configurable["trace_id"] = trace_id
         if chat_cfg is not None:
             configurable["chat_cfg"] = chat_cfg
         if extra:

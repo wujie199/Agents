@@ -224,8 +224,8 @@ def test_merge_tags_into_metadata_dedupes():
 def test_resolve_scenario_tags(tmp_path):
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    (cfg_dir / "scenarios.yml").write_text(
-        "scenarios:\n  legal:\n    tags: [合同, 法律]\n    tag_match: all\n",
+    (cfg_dir / "rag.yml").write_text(
+        "scenarios:\n  items:\n    legal:\n      tags: [合同, 法律]\n      tag_match: all\n",
         encoding="utf-8",
     )
     tags, match = resolve_scenario_tags("legal", config_dir=str(cfg_dir))

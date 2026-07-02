@@ -14,6 +14,7 @@ _think_dbg = logging.getLogger("thinking_debug")
 
 from core.composition.run_context import RunContext
 
+from app.agents.memory.l0_context import maybe_compress_turn_context
 from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
 from app.agents.orchestration.chat_nodes import fetch_turn_history, persist_user_and_assistant
 from app.agents.orchestration.chat_turn import ChatTurnResult
@@ -124,6 +125,7 @@ async def _stream_direct_after_prepare(
     rag_empty: bool,
     evidences_summary: list | None = None,
     memory_summary: dict | None = None,
+    memory_snapshot_hash: str = "",
 ) -> AsyncIterator[str]:
     """prepare 完成后直连 LLM 流式 + persist。"""
     yield json.dumps(
@@ -173,6 +175,22 @@ async def _stream_direct_after_prepare(
             yield json.dumps({"type": "delta", "text": delta}, ensure_ascii=False)
 
     assistant_text = strip_model_reasoning("".join(parts))
+    dict_msgs = []
+    for m in lc_messages:
+        role = getattr(m, "type", None) or "user"
+        if role == "human":
+            role = "user"
+        elif role == "ai":
+            role = "assistant"
+        dict_msgs.append({"role": role, "content": str(m.content or "")})
+    dict_msgs.append({"role": "assistant", "content": assistant_text})
+    mem_hash = memory_snapshot_hash or str((memory_summary or {}).get("memory_snapshot_hash") or "")
+    await maybe_compress_turn_context(
+        ctx,
+        dict_msgs,
+        chat_cfg=session.chat_cfg,
+        memory_snapshot_hash=mem_hash,
+    )
     # ── P3: persist 与 history 读取并行化 ──
     _persist_task = asyncio.create_task(
         persist_user_and_assistant(
@@ -257,6 +275,7 @@ async def stream_chat_turn_langgraph_events(
                         rag_empty=bool(output.get("rag_empty", True)),
                         evidences_summary=output.get("evidences_summary") or [],
                         memory_summary=output.get("memory_summary") or {},
+                        memory_snapshot_hash=str(output.get("memory_snapshot_hash") or ""),
                     ):
                         yield payload
                     direct_handled = True

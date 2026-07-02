@@ -10,7 +10,7 @@ P1 迁移 `rag` → `knowledge` 时，曾用 PowerShell 对全仓库做 `rag.` �
 - `composition/production_factory.py` 等核心入口：恢复为正常中文
 - `knowledge/bridges/cleaners/domain_cleaners.py`：正则与替换串改为 UTF-8 中文
 - `utils/cache_handler.py` 等：重写 docstring
-- 批量脚本：`scripts/fix_mojibake*.py`（可按需再跑）
+- 批量脚本已移除（历史 `scripts/fix_mojibake*.py`）；新乱码请用 Python 按 UTF-8 单文件修复
 
 ## 预防
 
@@ -19,11 +19,6 @@ P1 迁移 `rag` → `knowledge` 时，曾用 PowerShell 对全仓库做 `rag.` �
 
 ## 若仍看到乱码
 
-在仓库根目录执行：
-
-```bash
-python scripts/fix_mojibake_comments.py
-python scripts/fix_mojibake_docstrings.py
-```
+用编辑器或 Python 脚本按 UTF-8 读写修复；勿用 PowerShell 默认编码批量替换。
 
 测试目录 `tests/` 中部分断言字符串可能仍为乱码，不影响 RAG 主链路；需要时可单独改测试文案。

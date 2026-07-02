@@ -5,8 +5,8 @@ chat:
   max_history_turns: 6
   max_evidence_chars: 4000
   max_evidence_items: 5
-  rag_min_score: 0.45
-  rag_min_keep: 3
+  rag_min_score: 0.55
+  rag_min_keep: 2
   model_role: main_llm
 
   # Context Builder：字符预算 + 滚动摘要 + RAG 门控
@@ -96,6 +96,30 @@ chat:
   # 时间衰减：近期 session_search 结果权重高于远期
   time_decay: true
   time_decay_half_life_days: 90
+
+  # L0 上下文压缩（Hermes Phase A）：prompt tokens >= threshold × context_window 时触发
+  l0_context_compress_enabled: true
+  context_compress_threshold: 0.50
+  compress_target_ratio: 0.20
+  context_window_tokens: 128000
+
+observability:
+  enabled: true
+  trace_header: X-Request-ID
+  slow_threshold_ms:
+    prepare: 2000
+    agent: 8000
+    persist: 500
+  # 图节点 QPS 限流：memory | redis（设 REDIS_URL 时自动选 redis）
+  rate_limit_backend: memory
+  max_qps_per_tenant: 100
+  # 审计 NDJSON 持久化（data/audit/audit_YYYY-MM-DD.jsonl）
+  audit_persist: true
+  audit_log_dir: data/audit
+  # OpenTelemetry（环境变量，非 YAML）:
+  # OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+  # OTEL_SERVICE_NAME=agents-chat
+  # OTEL_TRACES_SAMPLER_ARG=0.1   # head sampling 比例 0.0–1.0
 
 # DeepAgents 规划层（可选依赖，pip install 'agents[planning]'）
 # 外层规划 harness：复杂任务分解 → 子Agent调度 → 上下文隔离

@@ -59,6 +59,30 @@ def test_filter_evidence_bundle_uses_rerank_score():
     assert filtered.evidences[0].id == "1"
 
 
+def test_filter_evidence_bundle_prefers_routing_score_order():
+    bundle = EvidenceBundle(
+        evidences=[
+            Evidence(
+                id="faq",
+                content="189. FAQ",
+                source_type=SourceType.VECTOR,
+                score=0.77,
+                metadata={"rerank_score": 0.89, "routing_score": 0.77},
+            ),
+            Evidence(
+                id="maint",
+                content="8. 断开电源",
+                source_type=SourceType.VECTOR,
+                score=0.88,
+                metadata={"rerank_score": 0.70, "routing_score": 0.88},
+            ),
+        ],
+        empty=False,
+    )
+    filtered = filter_evidence_bundle(bundle, min_score=0.0)
+    assert [ev.id for ev in filtered.evidences] == ["maint", "faq"]
+
+
 def test_format_evidence_bundle_respects_min_score():
     text = format_evidence_bundle(_bundle(), min_score=0.5)
     assert "高相关" in text

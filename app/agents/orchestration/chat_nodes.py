@@ -30,6 +30,10 @@ from app.agents.memory.memory_runtime_debug import (
 )
 from app.agents.context_builder import is_name_intro_query
 from app.agents.memory.name_remember import auto_remember_name_intro
+from app.agents.memory.l0_context import apply_l0_to_turn_messages
+from app.agents.memory.l4_context import apply_l4_prefetch_to_messages
+from app.agents.observability.instrument import span_ctx
+from core.ports.observability import Layer
 from app.agents.roles.evidence_fusion import fuse_evidence
 from app.agents.prompts.prompt_builder import (
     PROFILE_NAME_HINT,
@@ -167,6 +171,28 @@ async def build_turn_messages(
     rag_plan: Optional[dict] = None,
 ) -> tuple[list[dict[str, str]], int, bool, str, list[dict], dict]:
     """返回 (llm_messages, evidence_count, rag_empty, memory_snapshot_hash, evidences_summary, memory_summary)。"""
+    span_attrs: dict[str, Any] = {}
+    async with span_ctx(ctx, "prepare.build_turn_messages", Layer.AGENT, span_attrs):
+        return await _build_turn_messages_body(
+            ctx,
+            user_message,
+            cfg,
+            enable_rag=enable_rag,
+            rag_plan=rag_plan,
+            span_attrs=span_attrs,
+        )
+
+
+async def _build_turn_messages_body(
+    ctx: RunContext,
+    user_message: str,
+    cfg: ChatAgentConfig,
+    *,
+    enable_rag: bool,
+    rag_plan: Optional[dict] = None,
+    span_attrs: dict[str, Any],
+) -> tuple[list[dict[str, str]], int, bool, str, list[dict], dict]:
+    """build_turn_messages 实现体。"""
     clear_layer_triggers(ctx)
     memory = ctx.require_memory()
     await perf_await(ctx, "L2.ensure_session", memory.ensure_session(ctx.request))
@@ -511,6 +537,13 @@ async def build_turn_messages(
         history=trimmed_history,
         tool_hints=tool_hints,
     )
+    messages = await apply_l4_prefetch_to_messages(ctx, messages, user_message)
+    messages = apply_l0_to_turn_messages(
+        ctx,
+        messages,
+        memory_snapshot_hash=snap.hash,
+        chat_cfg=cfg,
+    )
     ev_count = len(bundle.evidences) if bundle and bundle.evidences else 0
     agent_debug(
         "PROMPT",
@@ -618,10 +651,13 @@ async def build_turn_messages(
         "l4_hit": any(m in (session_context or "") for m in _l4_markers),
         "l4_preview": "",
     }
+    rag_empty = rag_miss if rag_attempted else (bundle.empty if bundle else True)
+    span_attrs["evidence_count"] = ev_count
+    span_attrs["rag_empty"] = rag_empty
     return (
         messages,
         ev_count,
-        rag_miss if rag_attempted else (bundle.empty if bundle else True),
+        rag_empty,
         snap.hash,
         evidences_summary,
         memory_summary,
@@ -697,3 +733,13 @@ async def persist_user_and_assistant(
         turn_id = ctx.extra.get("_active_turn_id")
         if turn_id:
             ctx.extra["_turn_persisted_id"] = turn_id
+
+    from app.agents.memory.l1_nudge import maybe_nudge_memory_review
+
+    interval = getattr(memory, "l1_nudge_interval", 0)
+    if interval:
+        await maybe_nudge_memory_review(
+            ctx,
+            nudge_interval=interval,
+            summarizer=getattr(memory, "_summarizer", None),
+        )

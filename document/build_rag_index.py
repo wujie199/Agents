@@ -3,10 +3,10 @@
 离线 RAG 建库 — 全流程在本文件可见
 
   ┌─────────────────────────────────────────────────────────────────┐
-  │  [1] 读配置    config/rag_pipeline.yml → RagPipelineConfig     │
+  │  [1] 读配置    config/rag.yml → RagPipelineConfig                 │
   │  [2] 摄取      PDF/Word/图/HTML → OCR；txt/md → 直读           │
   │  [3] 清理      postprocess_ocr + CompositeCleaner              │
-  │  [4] 打标      规则/关键词 metadata（config/metadata_tagging.yml）│
+  │  [4] 打标      规则/关键词 metadata（config/rag.yml → metadata.rules）│
   │  [5] 切块      RecursiveChunker（在 IndexService 内）           │
   │  [6] 向量入库   Embedder → Chroma (data/.../chroma_dev)         │
   │  [6b] BM25     同步写入 data/.../bm25_index/{collection}.json │
@@ -21,7 +21,7 @@
   python document/build_rag_index.py
   python document/build_rag_index.py --profile faq data/test_docs/*.pdf
   python document/build_rag_index.py --profile contract contract.docx
-  # 也可: export RAG_PIPELINE_CONFIG=config/rag_pipeline.faq.yml
+  # 也可: export RAG_CONFIG=config/rag.faq.yml
   # 默认扫描 document/rag/pdf 下 *.pdf；也可显式传 path
   # 强制重建：--force-reindex
 """
@@ -86,7 +86,7 @@ def step1_load_config(
     config_path: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> RagPipelineConfig:
-    """[1/6] 加载 rag_pipeline*.yml（profile / RAG_PIPELINE_CONFIG / 默认）。"""
+    """[1/6] 加载 rag*.yml（profile / RAG_CONFIG / 默认）。"""
     resolved = config_path or resolve_rag_pipeline_config_path(
         config_dir=config_dir,
         profile=profile,
@@ -537,7 +537,7 @@ def main() -> None:
         "--profile",
         default=None,
         choices=["faq", "contract"],
-        help="建库 profile，加载 config/rag_pipeline.{profile}.yml",
+        help="建库 profile，加载 config/rag.{profile}.yml",
     )
     parser.add_argument(
         "--index-profile",
