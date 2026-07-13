@@ -32,8 +32,8 @@ RAG 向量索引按 **tenant** 隔离。解析顺序（`app/agents/context_facto
 ### 重建按租户索引
 
 ```bash
-# 示例：为 tenant1 离线入库（见 document/rag 与 rag_pipeline.yml）
-python -m document.rag.cli ingest --tenant tenant1 ...
+# 示例：为 tenant1 离线入库（见 document/build_rag_index.py 与 config/rag.yml）
+python document/build_rag_index.py --tenant tenant1 data/test_docs/*.pdf
 export RAG_LEGACY_DEFAULT=false
 python app/chat_repl.py --tenant tenant1 --user user1
 ```

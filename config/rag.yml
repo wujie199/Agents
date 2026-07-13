@@ -1,19 +1,35 @@
-# RAG 统一配置（模型路径见 config/models.yml；chat 侧 RAG 门控见 config/chat.yml）
+# RAG 基座（profile 增量见 rag.faq.yml / rag.contract.yml；模型见 models.yml）
 
 collection_name: agent
 
-enable_vector_index: true
-enable_graph_index: true
+# 图索引二期预留；faq/contract 与 production example 均为 false
+enable_graph_index: false
 
+# 仅 chunk_strategy != seven_step 时使用；七步粒度见 chunk_pipeline
 chunk_size: 800
 chunk_overlap: 0
-chunk_strategy: faq
-default_top_k: 10
-rerank_top_n: 5
-enable_cache: true
-cache_ttl_seconds: 900
-model_version: bge-small-zh-v1.5-local
-embedding_batch_size: 32
+chunk_strategy: seven_step
+
+embedding:
+  backend: local_bge
+  normalize: true
+  max_tokens: 512
+  truncate_marker: "[...]"
+  query_instruction: "为这个句子生成表示以用于检索相关文章："
+  batch_size: 32
+  oom_halve_retry: true
+  reject_zero_vectors: true
+  write_max_retries: 3
+  dlq_path: data/rag_offline/embedding_dlq.jsonl
+  enable_chunk_incremental: true
+  enable_embedding_cache_read: true
+  incremental_on_reindex: true
+  # force-reindex 时删旧向量并全量写入（验证 Paddle OCR 后日常可改回 false）
+  force_full_delete_on_reindex: true
+  versioned_collection: false
+
+chunk_pipeline:
+  parent_store_dir: data/rag_offline/parent_chunks
 
 storage:
   chroma:
@@ -26,20 +42,8 @@ storage:
     hybrid_search: false
     bm25_k: 10
     hybrid_weights: [0.5, 0.5]
-  legacy:
-    md5_hex_store: md5.txt
-    data_path: data
-    allowed_konwledge_file_type: [pdf, txt]
-    exclude_filenames:
-      - 常见问题.txt
 
-# 元数据打标（rule_keyword backend）
 metadata:
-  enabled: true
-  backend: rule_keyword
-  rules_path: null
-  max_tags: 32
-  tag_filename: true
   rules:
     - name: contract
       tags: [合同, 法律]
@@ -72,7 +76,6 @@ metadata:
     md: [markdown]
     txt: [text]
 
-# 单库多场景检索（python document/query_rag.py --scenario customer_service）
 scenarios:
   default_scenario: null
   items:
@@ -96,89 +99,32 @@ scenarios:
       tag_match: any
 
 ingest:
-  mode: ocr_only
-  routing: simplified
-  plain_text_formats: [txt, md]
-  ocr_backend: auto
-  language: ch
-  word_to_pdf: true
-  word_converter: libreoffice
-  pdf_dpi: 200
-  ocr_use_layout: true
-  enable_cleaning: true
-  ocr_postprocess: true
-  cleaning_level: standard
-  ocr_device: cpu
-  ocr_preprocess: auto
-  ocr_enable_formula: true
+  ocr_fast: false
+  # false = 每页强制 Paddle OCR（验证用）；生产 FAQ 可改回 true 走 native 抽字
+  enable_pdf_routing: false
+  pdf_dpi: 300
+  pdf_threads: 1
+  ocr_enable_mkldnn: false
+  # 降低版面框阈值，减少 FAQ 短块漏检（默认 0.5）
+  ocr_layout_threshold: 0.35
+  ocr_layout_score_threshold: 0.35
+  ocr_max_attempts: 4
   ocr_formula_model: PP-FormulaNet_plus-S
-  ocr_max_attempts: 3
-  ocr_fast: true
-  ocr_table_e2e: false
-  ocr_enable_mkldnn: true
 
 retrieval:
-  primary_backend: vector
   enable_hybrid: true
-  enable_vector_search: true
-  enable_bm25_search: true
-  vector_top_k: 10
-  bm25_top_k: 10
-  hybrid_weights: [0.32, 0.68]
-  fusion_strategy: weighted
-  fusion_top_n: 10
   enable_rerank: true
-  rerank_top_n: 5
+  hybrid_weights: [0.32, 0.68]
   rerank_min_score: 0.4
-  use_mock_rerank_fallback: true
-  enable_router: true
   auto_route: false
-  enable_graph: false
-  enable_sql: false
 
 rewrite:
-  enable_hyde: false
   enable_multi_query: true
-  multi_query_count: 3
-  enable_rule_rewrite: true
-  rule_max_queries: 4
-  maintenance_source_boost: 0.12
-  maintenance_post_rerank_boost: 0.18
-  faq_non_maintenance_penalty: 0.12
-  llm_rewrite_once: true
-  hybrid_search_concurrency: 4
-  default_profile: generic_knowledge
   two_stage:
     enabled: true
     top1_min_rerank: 0.75
     require_maintenance_source: true
-  profiles:
-    maintenance:
-      rule: true
-      llm: on_miss
-      max_hybrid_queries: 6
-    faq_like:
-      rule: true
-      llm: never
-      max_hybrid_queries: 3
-    how_to:
-      rule: true
-      llm: on_miss
-      max_hybrid_queries: 4
-    product_compare:
-      rule: true
-      llm: on_miss
-      max_hybrid_queries: 4
-    exact_lookup:
-      rule: false
-      llm: never
-      max_hybrid_queries: 1
-    generic_knowledge:
-      rule: false
-      llm: never
-      max_hybrid_queries: 2
 
-# RAGAS 评测（scripts/rag_eval.py）
 eval:
   generation:
     model_role: eval_generation_llm

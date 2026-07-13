@@ -13,7 +13,17 @@ from core.ports.skills import SkillExecutionResult
 
 
 class _FakeMemory:
-    async def session_search(self, query, context, limit=5, scope="session"):
+    async def session_search(
+        self,
+        query,
+        context,
+        limit=5,
+        scope="session",
+        mode=None,
+        sort="newest",
+        around_message_id="",
+        session_link="",
+    ):
         return f"hit:{query}:{context.session_id}"
 
     async def session_search_detail(self, query, context, limit=5, scope="session"):

@@ -16,6 +16,7 @@ from document.rag.application.retrieval.rewrite_factory import (
     build_query_rewriter,
     resolve_rewrite_llm,
 )
+from document.rag.application.embedding.collection import effective_collection_name
 from document.rag.bootstrap.model_bridge import apply_models_to_rag_config
 from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
 from document.rag.facades.knowledge_base import KnowledgeBasePortAdapter
@@ -85,7 +86,7 @@ def build_retrieval_router(
         graph_port=graph_port,
         query_rewriter=query_rewriter,
         bm25_index=bm25_index,
-        collection_name=config.collection_name,
+        collection_name=effective_collection_name(config),
         enable_cache=config.enable_cache,
         cache_ttl=config.cache_ttl_seconds,
         enable_graph=config.retrieval.enable_graph,
@@ -94,6 +95,7 @@ def build_retrieval_router(
         enable_rerank=config.retrieval.enable_rerank,
         default_top_k=config.default_top_k,
         default_rerank_n=config.rerank_top_n,
+        embedding_cfg=config.embedding,
     )
 
 

@@ -7,7 +7,7 @@
   │  [2] 摄取      PDF/Word/图/HTML → OCR；txt/md → 直读           │
   │  [3] 清理      postprocess_ocr + CompositeCleaner              │
   │  [4] 打标      规则/关键词 metadata（config/rag.yml → metadata.rules）│
-  │  [5] 切块      RecursiveChunker（在 IndexService 内）           │
+  │  [5] 切块      SevenStepChunkPipeline（Step1–Step7，IndexService 内）│
   │  [6] 向量入库   Embedder → Chroma (data/.../chroma_dev)         │
   │  [6b] BM25     同步写入 data/.../bm25_index/{collection}.json │
   └─────────────────────────────────────────────────────────────────┘
@@ -149,7 +149,25 @@ def step3_clean_text(
         log.warning("[3/6] clean  skipped (ingest failed)")
         return ingest
     doc_format = detect_format(str(file_path))
+    before_chars = len(ingest.content or "")
     chars = apply_ingest_cleaning(ingest, doc_format, cfg)
+    # #region agent log
+    from document.rag.shared.debug_trace import debug_trace, preview_text
+
+    debug_trace(
+        "build_rag_index.py:step3_clean",
+        "清洗完成",
+        data={
+            "doc_id": ingest.metadata.get("doc_id"),
+            "format": doc_format.value,
+            "cleaned": ingest.metadata.get("cleaned", False),
+            "before_chars": before_chars,
+            "after_chars": chars,
+            "preview": preview_text(ingest.content or "", 500),
+        },
+        hypothesis_id="H5",
+    )
+    # #endregion
     log.info(
         "[3/6] clean  format=%s  cleaned=%s  chars=%d",
         doc_format.value,
@@ -196,6 +214,7 @@ async def step5_chunk_embed_write(
     cfg: RagPipelineConfig,
     index_service,
     index_profile: IndexProfile,
+    previous_fingerprints: Optional[dict] = None,
 ) -> IndexResult:
     """[5/6][6/6] 切块 → Embedding → 写入 Chroma（IndexService 内聚 5+6）。"""
     if ingest.status == IngestStatus.FAILED:
@@ -205,6 +224,7 @@ async def step5_chunk_embed_write(
         tenant_id=tenant_id,
         doc_id=doc_id,
         profile=index_profile,
+        previous_fingerprints=previous_fingerprints,
     )
     log.info(
         "[5/6] chunk  doc_id=%s  chunks=%d",
@@ -362,13 +382,35 @@ async def build_one_document(
     await purge_superseded_same_filename(
         index_service, manifest, tenant_id, file_path, file_md5
     )
+    previous_fingerprints = None
+    entry = manifest.get_entry(tenant_id, file_md5)
+    if entry and cfg.embedding.enable_chunk_incremental:
+        previous_fingerprints = entry.get("chunk_fingerprints")
     if force_reindex:
-        deleted = await index_service.delete_document(doc_id, tenant_id)
-        if deleted:
-            log.info("[5/6] force-reindex 已删除旧索引 doc_id=%s", doc_id)
+        full_delete = cfg.embedding.force_full_delete_on_reindex or not (
+            cfg.embedding.enable_chunk_incremental
+            and cfg.embedding.incremental_on_reindex
+        )
+        if full_delete:
+            deleted = await index_service.delete_document(doc_id, tenant_id)
+            if deleted:
+                log.info("[5/6] force-reindex 已删除旧索引 doc_id=%s", doc_id)
+            previous_fingerprints = None
+        else:
+            log.info(
+                "[5/6] force-reindex 增量模式 doc_id=%s fingerprints=%d",
+                doc_id,
+                len(previous_fingerprints or {}),
+            )
     try:
         index_result = await step5_chunk_embed_write(
-            ingest, doc_id, tenant_id, cfg, index_service, index_profile
+            ingest,
+            doc_id,
+            tenant_id,
+            cfg,
+            index_service,
+            index_profile,
+            previous_fingerprints=previous_fingerprints,
         )
     except Exception as exc:
         log.error("[5/6] index failed: %s", exc)
@@ -390,6 +432,7 @@ async def build_one_document(
         config_hash=config_hash,
         chunk_count=index_result.chunk_count,
         vectors_written=index_result.vectors_written,
+        chunk_fingerprints=index_result.chunk_fingerprints,
     )
     log.info("=== OK %s (manifest updated) ===", file_path.name)
     return BuildReport(

@@ -167,6 +167,28 @@ class TestL1HotMemory:
         assert count == 1
         assert "k: v" in memory.compose_prompt_snapshot(ctx).memory_text
 
+    @pytest.mark.asyncio
+    async def test_confirm_pending_invalidates_frozen_snapshot(self, memory):
+        ctx = _ctx("snap_inval")
+        memory._hot.save_user(ctx.tenant_id, ctx.user_id, "姓名: 张三\n")
+        snap_before = memory.compose_prompt_snapshot(ctx)
+        assert "张三" in snap_before.memory_text
+
+        await memory.update_prompt_memory(
+            ctx,
+            MemoryDelta(key="姓名", value="武杰", source="user"),
+            require_hitl=True,
+        )
+        snap_frozen = memory.compose_prompt_snapshot(ctx)
+        assert snap_frozen.hash == snap_before.hash
+        assert "武杰" not in snap_frozen.memory_text
+
+        count = await memory.confirm_pending_deltas(ctx)
+        assert count == 1
+        snap_after = memory.compose_prompt_snapshot(ctx)
+        assert snap_after.hash != snap_before.hash
+        assert "武杰" in snap_after.memory_text
+
 
 class TestL2Archive:
     @pytest.mark.asyncio

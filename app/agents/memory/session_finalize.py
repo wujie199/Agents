@@ -97,6 +97,13 @@ async def enrich_l1_before_finalize(
             MemoryDelta(key=key, value=val, source="user"),
             require_hitl=require_hitl,
         )
+        from app.agents.memory.memory_graph_state import append_pending_memory_delta
+
+        append_pending_memory_delta(
+            ctx,
+            MemoryDelta(key=key, value=val, source="user"),
+            require_hitl=require_hitl,
+        )
         written += 1
     agent_debug(
         "FINALIZE-L1",

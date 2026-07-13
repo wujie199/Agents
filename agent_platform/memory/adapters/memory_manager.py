@@ -108,9 +108,9 @@ class MemoryManager:
         self, user_message: str, context: RequestContext
     ) -> list[MemorySnippet]:
         """并行 prefetch，超时 fail-open。"""
-        await self._maybe_consume_queued_prefetch(context)
-
-        snippets: list[MemorySnippet] = []
+        snippets: list[MemorySnippet] = list(
+            await self._maybe_consume_queued_prefetch(context)
+        )
         providers = self._active_providers()
 
         async def _prefetch_one(provider: MemoryProvider) -> list[MemorySnippet]:
@@ -145,27 +145,28 @@ class MemoryManager:
 
     async def _maybe_consume_queued_prefetch(
         self, context: RequestContext
-    ) -> None:
+    ) -> list[MemorySnippet]:
         future = self._pending_prefetch
         if future is None:
-            return
+            return []
         if self._pending_session_id != context.session_id:
-            return
+            return []
         if not future.done():
-            return
+            return []
+        snippets: list[MemorySnippet] = []
         try:
-            snippets = future.result()
+            snippets = list(future.result() or [])
             self._logger.debug(
                 "Consumed queued prefetch for session=%s count=%d",
                 context.session_id,
                 len(snippets),
             )
-            _ = snippets
         except Exception as exc:
             self._logger.debug("Queued prefetch failed: %s", exc)
         finally:
             self._pending_prefetch = None
             self._pending_session_id = None
+        return snippets
 
     def queue_prefetch(
         self, user_message: str, context: RequestContext

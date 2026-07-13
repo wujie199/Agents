@@ -2,12 +2,15 @@
 
 from core.ports.rag.chunker import ChunkerPort
 from document.rag.config.pipeline import RagPipelineConfig
+from document.rag.application.indexing.chunker import create_chunker, parse_chunk_strategy
 
 
 def build_chunker(cfg: RagPipelineConfig) -> ChunkerPort:
-    """按 config.chunk_strategy 构建 chunker（当前仅 faq/recursive 策略）。"""
-    strategy = (cfg.chunk_strategy or "faq").lower()
-    # 当前 chunker 在 indexing/service 中内联使用 split_text_into_chunks，
-    # 后续可在此处切换实现。
-    from document.rag.shared.text_chunker import split_text_into_chunks
-    return split_text_into_chunks
+    """按 config.chunk_strategy 构建 chunker。"""
+    strategy = parse_chunk_strategy(cfg.chunk_strategy)
+    kwargs = {
+        "chunk_size": cfg.chunk_size,
+        "chunk_overlap": cfg.chunk_overlap,
+        "pipeline_cfg": cfg.chunk_pipeline,
+    }
+    return create_chunker(strategy, **kwargs)

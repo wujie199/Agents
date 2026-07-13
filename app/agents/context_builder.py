@@ -30,7 +30,16 @@ _RAG_SKIP_RE = re.compile(
 # 回忆类：可预检索 session_search
 _RECALL_RE = re.compile(
     r"之前|上次|刚才|还记得|记得吗|说过什么|问过什么|我们聊|早些时候|前面|"
-    r"之前聊|之前问|上次说的|刚才提到的|前面提到的|之前提到的|还记得吗",
+    r"之前聊|之前问|上次说的|刚才提到的|前面提到的|之前提到的|还记得吗|"
+    r"都聊|聊过|历史问题",
+)
+
+# 枚举型 meta 回忆（列最近 user 发言，不做语义 session_search）
+_META_RECALL_RE = re.compile(
+    r"(?:问过|说过|聊过|讨论过)(?:什么|哪些|啥)|"
+    r"(?:什么|哪些)问题|有哪些问题|历史问题|都(?:问|聊|说)过什么|记得(?:我)?问|"
+    r"聊(?:过|了)什么|我们聊(?:过|了)?(?:什么|啥)|"
+    r"之前(?:都)?(?:问|聊|说)了?什么",
 )
 
 # 知识倾向：query 中同时包含回忆 + 知识检索关键词（混合意图）
@@ -115,6 +124,52 @@ def is_recall_query(query: str) -> bool:
     return bool(_RECALL_RE.search((query or "").strip()))
 
 
+_MIXED_EVAL_RE = re.compile(
+    r"怎么样|如何|好不好|行不行|能不能|是不是|对不对|多少|什么意思|哪个更好|能行吗|行吗",
+)
+
+
+def is_meta_recall_query(query: str) -> bool:
+    """枚举型回忆：列最近 user 问题，而非语义检索特定话题。"""
+    q = (query or "").strip()
+    if not q:
+        return False
+    # 「什么品牌 / 什么方案」→ 指向具体话题，非 meta
+    m = re.search(r"什么(.+)$", q)
+    if m:
+        rest = re.sub(r"[\s?!.，。~？！吗呢]+$", "", m.group(1)).strip()
+        if rest and rest not in ("问题", "内容"):
+            return False
+    if re.search(r"(是什么|是啥|是哪些)$", q):
+        return False
+    if re.search(
+        r"(问过什么|说过什么|聊过什么|问过哪些|说过哪些|聊过哪些|"
+        r"什么问题|哪些内容|有哪些问题|聊过什么内容)[\s?!.，。~？！吗呢]*$",
+        q,
+    ):
+        return True
+    if _META_RECALL_RE.search(q):
+        return True
+    if not is_recall_query(q):
+        return False
+    # 「上次/之前 + 具体话题 + 怎么样」→ 指向性回忆
+    if is_knowledge_like(q) and re.search(
+        r"(上次|之前|刚才).+(说|问|提|讨论|聊)", q
+    ):
+        return False
+    return False
+
+
+def is_mixed_recall_knowledge(query: str) -> bool:
+    """混合意图：回忆 + 明确求结论/对比（非 meta 枚举）。"""
+    q = (query or "").strip()
+    if is_meta_recall_query(q):
+        return False
+    if not is_recall_query(q):
+        return False
+    return bool(_MIXED_EVAL_RE.search(q))
+
+
 def is_cross_session_recall(query: str) -> bool:
     return bool(_CROSS_SESSION_RE.search((query or "").strip()))
 
@@ -136,12 +191,6 @@ def is_skill_query(query: str) -> bool:
 def is_knowledge_like(query: str) -> bool:
     """query 包含知识倾向关键词（如"怎么样"、"如何"、"区别"等）。"""
     return bool(_KNOWLEDGE_LIKE_RE.search((query or "").strip()))
-
-
-def is_mixed_recall_knowledge(query: str) -> bool:
-    """混合意图：同时包含回忆标记和知识倾向（如"上次问的那个方案怎么样了"）。"""
-    q = (query or "").strip()
-    return is_recall_query(q) and is_knowledge_like(q)
 
 
 def is_l4_query(query: str) -> bool:
@@ -366,36 +415,179 @@ async def build_rolling_summary(
     return f"【更早对话摘要】\n{raw[:max_out]}…"
 
 
-async def prefetch_session_recall(
+def _format_meta_recall_line(msg: dict, *, scope: str) -> str:
+    ts = str(msg.get("ts") or "")
+    content = sanitize_turn_content(msg.get("content"), role="user")
+    if not content:
+        return ""
+    preview = content if len(content) <= 200 else content[:200] + "..."
+    if scope == "user":
+        sid = str(msg.get("session_id") or "")
+        prefix = f"[session={sid}] " if sid else ""
+        return f"{prefix}[{ts}] user: {preview}"
+    return f"[{ts}] user: {preview}"
+
+
+def _collect_recent_user_messages(
+    rows: list[dict],
+    *,
+    limit: int,
+    dedupe: bool = True,
+    order: str = "desc",
+) -> list[dict]:
+    """从消息行中取最近 limit 条不重复 user 发言（去重保留最早一条，默认按时间倒序）。"""
+    user_rows = [r for r in rows if str(r.get("role") or "") == "user"]
+    user_rows.sort(key=lambda r: str(r.get("ts") or ""))
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for row in user_rows:
+        content = sanitize_turn_content(row.get("content"), role="user")
+        if not content:
+            continue
+        key = content.strip()
+        if dedupe and key in seen:
+            continue
+        if dedupe:
+            seen.add(key)
+        unique.append(row)
+    picked = unique[-limit:] if len(unique) > limit else unique
+    if order == "desc":
+        picked = sorted(picked, key=lambda r: str(r.get("ts") or ""), reverse=True)
+    return picked
+
+
+def _sort_messages_by_ts(messages: list[dict], *, order: str = "desc") -> list[dict]:
+    reverse = order == "desc"
+    return sorted(messages, key=lambda r: str(r.get("ts") or ""), reverse=reverse)
+
+
+def _format_meta_recall_body(
+    messages: list[dict],
+    *,
+    scope: str,
+    max_chars: int,
+) -> str:
+    lines = [
+        line
+        for msg in messages
+        if (line := _format_meta_recall_line(msg, scope=scope))
+    ]
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    if len(body) <= max_chars:
+        return body
+    truncated = body[:max_chars]
+    last_break = truncated.rfind("\n")
+    if last_break > max_chars * 0.6:
+        truncated = truncated[:last_break]
+    return truncated + "\n[... truncated ...]"
+
+
+async def _prefetch_meta_recall(
     ctx: RunContext,
     query: str,
     cfg: ChatAgentConfig,
     *,
-    enabled: bool = True,
+    strategy: str,
+    scope: str,
+) -> str:
+    """meta/b browse 回忆：按时间倒序列最近 user 发言。"""
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
+
+    memory = ctx.memory
+    if memory is None:
+        return ""
+    limit = max(
+        int(getattr(cfg, "meta_recall_recent_limit", 10) or 10),
+        cfg.session_search_prefetch_limit,
+    )
+    max_chars = cfg.session_search_prefetch_max_chars
+    label = "跨会话回忆" if strategy == "browse" or scope == "user" else "会话回忆"
+    messages: list[dict] = []
+
+    try:
+        if strategy == "browse":
+            raw = await memory.session_search(
+                query or "browse",
+                ctx.request,
+                limit=min(limit, 10),
+                scope="session",  # type: ignore[arg-type]
+                mode="browse",
+                sort="newest",
+            )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("mode") == "browse":
+                for item in payload.get("sessions") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str((item.get("session") or {}).get("session_id") or "")
+                    for msg in item.get("messages") or []:
+                        if not isinstance(msg, dict):
+                            continue
+                        if str(msg.get("role") or "") != "user":
+                            continue
+                        messages.append({**msg, "session_id": sid})
+            messages = _sort_messages_by_ts(messages, order="desc")[:limit]
+        else:
+            list_recent = getattr(memory, "list_recent_turns", None)
+            if list_recent is None:
+                trace_layer_trigger(
+                    ctx, "L2", "meta_recall_recent", False, "no_list_recent_turns"
+                )
+                return ""
+            rows = await list_recent(ctx.request, limit=limit * 4)
+            messages = _collect_recent_user_messages(
+                rows, limit=limit, dedupe=True, order="desc"
+            )
+    except Exception:
+        trace_layer_trigger(ctx, "L2", "meta_recall_recent", False, "error")
+        return ""
+
+    display_scope = "user" if strategy == "browse" or scope == "user" else "session"
+    body = _format_meta_recall_body(
+        messages, scope=display_scope, max_chars=max_chars
+    )
+    trace_layer_trigger(
+        ctx,
+        "L2",
+        "meta_recall_recent",
+        bool(body),
+        f"strategy={strategy},scope={scope}",
+        data={
+            "query_preview": (query or "")[:80],
+            "user_message_count": len(messages),
+            "chars": len(body),
+            "recall_strategy": strategy,
+        },
+    )
+    if not body:
+        return ""
+    return f"【{label}·最近提问】\n{body}"
+
+
+async def _prefetch_semantic_recall(
+    ctx: RunContext,
+    query: str,
+    cfg: ChatAgentConfig,
+    *,
+    scope: str,
 ) -> str:
     from app.agents.memory.memory_runtime_debug import trace_layer_trigger
 
-    if not enabled:
-        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_disabled")
-        return ""
-    if not cfg.session_search_prefetch:
-        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "config_off")
-        return ""
-    # ── P3: 如果 retrieval_plan 明确跳过 session_search，直接返回 ──
-    if hasattr(cfg, "_plan_skip_session_search") and cfg._plan_skip_session_search:
-        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_skip")
-        return ""
-    if not cfg.retrieval_orchestration and not is_recall_query(query):
-        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "not_recall_query")
-        return ""
     memory = ctx.memory
     if memory is None:
-        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "no_memory_port")
         return ""
-    scope = resolve_recall_scope(query, cfg)
     trace_layer_trigger(
-        ctx, "L2", "session_search_prefetch", True, f"scope={scope}",
-        data={"query_preview": (query or "")[:80]},
+        ctx,
+        "L2",
+        "session_search_prefetch",
+        True,
+        f"scope={scope}",
+        data={"query_preview": (query or "")[:80], "recall_strategy": "semantic"},
     )
     try:
         if is_recall_query(query):
@@ -427,6 +619,59 @@ async def prefetch_session_recall(
             )
     except Exception:
         pass
+    return ""
+
+
+async def prefetch_session_recall(
+    ctx: RunContext,
+    query: str,
+    cfg: ChatAgentConfig,
+    *,
+    enabled: bool = True,
+    plan: Optional["RetrievalPlan"] = None,
+) -> str:
+    from app.agents.memory.memory_runtime_debug import trace_layer_trigger
+    from app.agents.roles.retrieval_router import build_retrieval_plan
+
+    if not enabled:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_disabled")
+        return ""
+    if not cfg.session_search_prefetch:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "config_off")
+        return ""
+    if hasattr(cfg, "_plan_skip_session_search") and cfg._plan_skip_session_search:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_skip")
+        return ""
+    if ctx.memory is None:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "no_memory_port")
+        return ""
+
+    active_plan = plan or build_retrieval_plan(
+        query, cfg, enable_rag=cfg.enable_rag
+    )
+    if not active_plan.run_session_search:
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "plan_off")
+        return ""
+    if not cfg.retrieval_orchestration and not is_recall_query(query):
+        trace_layer_trigger(ctx, "L2", "session_search_prefetch", False, "not_recall_query")
+        return ""
+
+    strategy = active_plan.recall_strategy or "semantic"
+    scope = active_plan.recall_scope or resolve_recall_scope(query, cfg)
+
+    if strategy == "meta_recent":
+        return await _prefetch_meta_recall(
+            ctx, query, cfg, strategy="meta_recent", scope=scope
+        )
+    if strategy == "browse":
+        return await _prefetch_meta_recall(
+            ctx, query, cfg, strategy="browse", scope=scope
+        )
+    if strategy == "semantic":
+        return await _prefetch_semantic_recall(ctx, query, cfg, scope=scope)
+    trace_layer_trigger(
+        ctx, "L2", "session_search_prefetch", False, f"strategy={strategy}"
+    )
     return ""
 
 
@@ -547,7 +792,11 @@ async def prepare_session_context(
 
     async def _run_recall() -> str:
         return await prefetch_session_recall(
-            ctx, user_message, cfg, enabled=plan.run_session_search
+            ctx,
+            user_message,
+            cfg,
+            enabled=plan.run_session_search,
+            plan=plan,
         )
 
     async def _run_skills() -> str:

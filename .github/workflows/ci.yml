@@ -27,6 +27,8 @@ jobs:
             tests/test_context_factory.py \
             tests/test_context_factory_rag_tenant.py \
             tests/test_retrieval_router.py \
+            tests/test_routing_golden.py \
+            tests/test_retrieval_guardrail.py \
             tests/test_context_builder.py \
             tests/test_secondary_fixes.py \
             tests/test_chat_turn.py \
@@ -52,4 +54,18 @@ jobs:
             tests/test_infrastructure.py \
             tests/test_session_finalize.py \
             tests/test_enterprise_memory.py \
+            tests/test_memory_graph_state.py \
+            tests/test_memory_eval_pipeline.py \
+            tests/test_memory_eval_enterprise.py \
+            tests/test_memory_enterprise_loop.py \
+            tests/test_l0_context_compress.py \
+            tests/test_l1_memory_tools.py \
+            tests/test_langgraph_store_setup.py \
+            tests/test_hot_memory_langgraph_store.py \
+            tests/test_l1_nudge.py \
+            tests/test_web_observability_panel.py \
             -q --tb=short
+
+      - name: Memory eval smoke (mock)
+        run: |
+          python scripts/memory_eval.py --dataset sample.jsonl --mock-only --run-id ci-smoke

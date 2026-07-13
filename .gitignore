@@ -51,5 +51,10 @@ data/external_profiles/
 data/json/
 data/*.db
 data/*.lock
+data/pg_dev/
+data/audit/
+data/memory_eval/results/
+parent_chunks/
 app/.cursor/
+.cursor/
 data/rag_eval/results/

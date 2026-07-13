@@ -390,6 +390,8 @@ class MemoryPortAdapter:
         )
         for delta in pending:
             await self.apply_memory_delta(context, delta)
+        if pending:
+            self._frozen_snapshots.pop(self._session_snapshot_key(context), None)
         return len(pending)
 
     @staticmethod

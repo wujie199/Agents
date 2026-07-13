@@ -2,7 +2,8 @@ import pytest
 from document.rag.application.retrieval.router.classifier import QueryClassifier, QueryType, ClassificationResult
 from document.rag.application.retrieval.router.rules import RoutingRules, RetrievalPlan, BackendType
 from document.rag.application.retrieval.router.fusion import RRFFusion, WeightedFusion, CascadeFusion, FusionFactory
-from document.rag.application.indexing.chunker import RecursiveChunker, MarkdownChunker, create_chunker
+from document.rag.application.indexing.chunker import create_chunker, parse_chunk_strategy
+from document.rag.application.chunking.chunker import SevenStepChunker
 from document.rag.application.indexing.embedder import Embedder
 from document.rag.application.retrieval.rewrite.hyde import HyDERewriter
 from document.rag.application.retrieval.rewrite.multi_query import MultiQueryExpander, QueryRewriterPipeline
@@ -151,33 +152,21 @@ class TestFusionStrategies:
 
 
 class TestChunkers:
-    
-    @pytest.fixture
-    def sample_text(self):
-        return "第一段。\n\n第二段，比较长一些，包含更多内容。\n\n第三段。"
-
-    def test_recursive_chunker(self, sample_text):
-        chunker = RecursiveChunker(chunk_size=30, chunk_overlap=5)
-        chunks = chunker.chunk(sample_text, "test_doc")
-        
-        assert len(chunks) > 0
+    def test_seven_step_chunker(self):
+        text = "# 标题\n\n第一段内容。\n\n第二段内容。"
+        chunker = create_chunker(ChunkStrategy.SEVEN_STEP)
+        chunks = chunker.chunk(text, "test_doc", {"format": "md"})
+        assert len(chunks) >= 1
         assert all(c.doc_id == "test_doc" for c in chunks)
-        assert all(len(c.content) <= 35 for c in chunks)
-    
-    def test_markdown_chunker(self):
-        md_text = """Recovered docstring."""
-        chunker = MarkdownChunker(chunk_size=100)
-        chunks = chunker.chunk(md_text, "test_doc")
-        
-        assert len(chunks) >= 2
-        assert any("æ é¢ä¸" in c.content or "æ é¢ä¸" in c.metadata.get("header", "") for c in chunks)
-    
-    def test_create_chunker(self):
-        recursive = create_chunker(ChunkStrategy.RECURSIVE, chunk_size=300)
-        assert isinstance(recursive, RecursiveChunker)
-        
-        markdown = create_chunker(ChunkStrategy.MARKDOWN)
-        assert isinstance(markdown, MarkdownChunker)
+        assert chunks[0].metadata.get("strategy") == "seven_step"
+
+    def test_create_chunker_only_seven_step(self):
+        chunker = create_chunker(ChunkStrategy.SEVEN_STEP, chunk_size=300)
+        assert isinstance(chunker, SevenStepChunker)
+
+    def test_parse_chunk_strategy_deprecated_fallback(self):
+        assert parse_chunk_strategy("recursive") == ChunkStrategy.SEVEN_STEP
+        assert parse_chunk_strategy("seven_step") == ChunkStrategy.SEVEN_STEP
 
 
 class TestEmbedder:
@@ -190,10 +179,10 @@ class TestEmbedder:
         embedder = Embedder(
             embedding_model=MockModel(),
             batch_size=16,
-            model_version="v1"
+            model_version="v1",
         )
-        
-        assert embedder._batch_size == 16
+
+        assert embedder._encoder.config.batch_size == 16
         assert embedder._model_version == "v1"
 
 

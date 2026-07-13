@@ -26,6 +26,10 @@ class ObservabilityConfig:
     max_qps_per_tenant: int = 100
     audit_persist: bool = False
     audit_log_dir: str = "data/audit"
+    audit_content: str = "redacted"
+    audit_include_retrieval: bool = True
+    audit_include_tools: bool = True
+    audit_max_content_chars: int = 8000
 
 
 _DEFAULT_OBS = ObservabilityConfig()
@@ -56,6 +60,9 @@ class ChatAgentConfig:
     # 知识类 session_search 预检索：false=截断拼接（快、少幻觉）；回忆类见 session_search_llm_on_recall
     session_search_use_llm_summary: bool = False
     session_search_llm_on_recall: bool = True  # auto | session | user
+    # meta 回忆（问过什么/聊过什么）：按时间列最近 user 发言，非语义检索
+    meta_recall_recent_list: bool = True
+    meta_recall_recent_limit: int = 10
     skill_prefetch: bool = True
     l4_profile_prefetch: bool = True
     # 检索编排（L0 路由）
@@ -128,6 +135,63 @@ class ChatAgentConfig:
 _DEFAULT = ChatAgentConfig()
 
 
+def _deep_merge_config(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """chat.yml 基座 + 增量：嵌套 dict 递归合并，标量/列表以 overlay 为准。"""
+    result = dict(base)
+    for key, overlay_val in overlay.items():
+        base_val = result.get(key)
+        if isinstance(overlay_val, dict) and isinstance(base_val, dict):
+            result[key] = _deep_merge_config(base_val, overlay_val)
+        else:
+            result[key] = overlay_val
+    return result
+
+
+def chat_base_path(config_dir: str | Path = "config") -> Path:
+    return Path(config_dir) / "chat.yml"
+
+
+def resolve_chat_config_path(config_dir: str | Path = "config") -> Path:
+    """CHAT_CONFIG 环境变量 > config/chat.yml。"""
+    env_path = os.environ.get("CHAT_CONFIG")
+    if env_path:
+        return Path(env_path)
+    return chat_base_path(config_dir)
+
+
+def load_chat_yaml_document(
+    config_path: str | Path,
+    *,
+    config_dir: str | Path = "config",
+) -> dict[str, Any]:
+    """加载 Chat YAML；非 chat.yml 与基座深合并。"""
+    path = Path(config_path)
+    raw: dict[str, Any]
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    base_path = chat_base_path(config_dir)
+    if path.resolve() != base_path.resolve():
+        base_raw: dict[str, Any] = {}
+        if base_path.is_file():
+            with base_path.open(encoding="utf-8") as f:
+                base_raw = yaml.safe_load(f) or {}
+        if base_raw:
+            return _deep_merge_config(base_raw, raw)
+    return raw
+
+
+def _load_concurrency_default(config_dir: str | Path = "config") -> dict[str, Any]:
+    path = Path(config_dir) / "concurrency.yml"
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    block = raw.get("default")
+    return dict(block) if isinstance(block, dict) else {}
+
+
 def _tuple_keys(raw: Any) -> Tuple[str, ...]:
     if not raw:
         return _DEFAULT.l1_extract_allowed_keys
@@ -151,12 +215,12 @@ def load_observability_config(
     *,
     profile: str | None = None,
 ) -> ObservabilityConfig:
-    path = Path(config_dir) / "chat.yml"
+    path = resolve_chat_config_path(config_dir)
     if not path.is_file():
         return _DEFAULT_OBS
-    with path.open(encoding="utf-8") as f:
-        raw: dict[str, Any] = yaml.safe_load(f) or {}
+    raw = load_chat_yaml_document(path, config_dir=config_dir)
     obs = raw.get("observability") or {}
+    conc = _load_concurrency_default(config_dir)
     thresholds = dict(_DEFAULT_OBS.slow_threshold_ms)
     raw_thresholds = obs.get("slow_threshold_ms")
     if isinstance(raw_thresholds, dict):
@@ -165,16 +229,25 @@ def load_observability_config(
     backend = str(obs.get("rate_limit_backend", _DEFAULT_OBS.rate_limit_backend))
     if obs.get("rate_limit_backend") == "redis" or os.environ.get("REDIS_URL"):
         backend = "redis"
+    default_qps = int(conc.get("max_qps_per_tenant", _DEFAULT_OBS.max_qps_per_tenant))
     return ObservabilityConfig(
         enabled=bool(obs.get("enabled", _DEFAULT_OBS.enabled)),
         trace_header=str(obs.get("trace_header", _DEFAULT_OBS.trace_header)),
         slow_threshold_ms=thresholds,
         rate_limit_backend=backend,
-        max_qps_per_tenant=int(
-            obs.get("max_qps_per_tenant", _DEFAULT_OBS.max_qps_per_tenant)
-        ),
+        max_qps_per_tenant=int(obs.get("max_qps_per_tenant", default_qps)),
         audit_persist=bool(obs.get("audit_persist", _DEFAULT_OBS.audit_persist)),
         audit_log_dir=str(obs.get("audit_log_dir", _DEFAULT_OBS.audit_log_dir)),
+        audit_content=str(obs.get("audit_content", _DEFAULT_OBS.audit_content)),
+        audit_include_retrieval=bool(
+            obs.get("audit_include_retrieval", _DEFAULT_OBS.audit_include_retrieval)
+        ),
+        audit_include_tools=bool(
+            obs.get("audit_include_tools", _DEFAULT_OBS.audit_include_tools)
+        ),
+        audit_max_content_chars=int(
+            obs.get("audit_max_content_chars", _DEFAULT_OBS.audit_max_content_chars)
+        ),
     )
 
 
@@ -183,11 +256,10 @@ def load_chat_config(
     *,
     profile: str | None = None,
 ) -> ChatAgentConfig:
-    path = Path(config_dir) / "chat.yml"
+    path = resolve_chat_config_path(config_dir)
     if not path.is_file():
         return _DEFAULT
-    with path.open(encoding="utf-8") as f:
-        raw: dict[str, Any] = yaml.safe_load(f) or {}
+    raw = load_chat_yaml_document(path, config_dir=config_dir)
     chat = _merge_chat_profile(raw.get("chat") or {}, profile)
     return ChatAgentConfig(
         enable_rag=bool(chat.get("enable_rag", _DEFAULT.enable_rag)),
@@ -259,6 +331,12 @@ def load_chat_config(
                 "session_search_llm_on_recall",
                 _DEFAULT.session_search_llm_on_recall,
             )
+        ),
+        meta_recall_recent_list=bool(
+            chat.get("meta_recall_recent_list", _DEFAULT.meta_recall_recent_list)
+        ),
+        meta_recall_recent_limit=int(
+            chat.get("meta_recall_recent_limit", _DEFAULT.meta_recall_recent_limit)
         ),
         skill_prefetch=bool(chat.get("skill_prefetch", _DEFAULT.skill_prefetch)),
         l4_profile_prefetch=bool(

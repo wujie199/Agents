@@ -1,46 +1,10 @@
-# Word 合同建库 profile — article 切块，legal+privacy 清洗，Word 直读优先
+# Word 合同建库 profile — 增量覆盖 config/rag.yml（OCR + 七步 + legal/privacy 清洗）
 # 用法: python document/build_rag_index.py --profile contract contract.docx
 
-collection_name: agent
-
-enable_vector_index: true
 enable_graph_index: false
 
-chunk_size: 1200
-chunk_overlap: 100
-chunk_strategy: article
-default_top_k: 10
-rerank_top_n: 5
-enable_cache: true
-cache_ttl_seconds: 900
-model_version: bge-small-zh-v1.5-local
-embedding_batch_size: 32
-
-enable_chunk_dedupe: true
-enable_semantic_dedupe: false
-
-storage:
-  chroma:
-    persist_directory: chroma_db
-    hnsw_space: cosine
-    hybrid_search: false
-
-metadata:
-  enabled: true
-  backend: rule_keyword
-  rules_path: null
-  max_tags: 32
-  tag_filename: true
-
-ingest:
-  mode: structured
-  routing: simplified
-  plain_text_formats: [txt, md]
-  word_to_pdf: false
-  enable_cleaning: true
-  ocr_postprocess: false
-  cleaning_level: standard
-  enable_header_footer_dedup: false
+chunk_pipeline:
+  domain: legal
 
 cleaners:
   default:
@@ -80,24 +44,9 @@ cleaners:
           min_meaningful_chars: 3
 
 retrieval:
-  primary_backend: vector
-  enable_hybrid: true
-  enable_vector_search: true
-  enable_bm25_search: true
-  vector_top_k: 10
-  bm25_top_k: 10
   hybrid_weights: [0.5, 0.5]
-  fusion_strategy: weighted
-  fusion_top_n: 10
-  enable_rerank: true
-  rerank_top_n: 5
-  rerank_min_score: 0.4
-  use_mock_rerank_fallback: true
   enable_router: false
   auto_route: false
-  enable_graph: false
-  enable_sql: false
 
 rewrite:
-  enable_hyde: false
   enable_multi_query: false

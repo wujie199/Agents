@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.ports.chunker import ChunkStrategy, Chunk
@@ -13,8 +14,12 @@ from core.ports.storage.vector import VectorPort, VectorRecord
 from document.rag.config import RagPipelineConfig
 from document.rag.application.indexing.chunker import create_chunker, parse_chunk_strategy
 from document.rag.application.indexing.document_store import RagDocumentStore
+from document.rag.application.embedding.collection import effective_collection_name
+from document.rag.application.embedding.dlq import append_embedding_dlq
 from document.rag.application.indexing.embedder import Embedder
 from document.rag.application.indexing.graph_sync import RagGraphSync
+from document.rag.application.chunking.chunker import SevenStepChunker
+from document.rag.application.chunking.parent_store import ParentChunkStore
 from document.rag.shared.dedupe import dedupe_chunks, semantic_dedupe
 
 
@@ -36,7 +41,7 @@ class IndexService:
         self._vector_port = vector_port
         self._embedding_model = embedding_model
         self._cache_port = cache_port
-        self._collection = self._config.collection_name
+        self._collection = effective_collection_name(self._config)
         self._sql_port = sql_port
         self._graph_port = graph_port
         self._doc_store = (
@@ -49,15 +54,23 @@ class IndexService:
         )
         self._bm25_index = bm25_index
         self._logger = logging.getLogger("knowledge.pipeline.index.service")
+        self._strategy = chunk_strategy or parse_chunk_strategy(self._config.chunk_strategy)
 
-        self._chunker = create_chunker(
-            chunk_strategy or parse_chunk_strategy(self._config.chunk_strategy),
-            chunk_size=self._config.chunk_size,
-            chunk_overlap=self._config.chunk_overlap,
-        )
+        embed_fn = self._build_embed_fn(embedding_model)
+        chunker_kwargs: Dict[str, Any] = {
+            "chunk_size": self._config.chunk_size,
+            "chunk_overlap": self._config.chunk_overlap,
+        }
+        if self._strategy == ChunkStrategy.SEVEN_STEP:
+            chunker_kwargs["pipeline_cfg"] = self._config.chunk_pipeline
+            chunker_kwargs["embed_fn"] = embed_fn
+
+        self._chunker = create_chunker(self._strategy, **chunker_kwargs)
+        parent_dir = getattr(self._config.chunk_pipeline, "parent_store_dir", "parent_chunks")
+        self._parent_store = ParentChunkStore(Path(parent_dir))
         self._embedder = Embedder(
             embedding_model=embedding_model,
-            batch_size=self._config.embedding_batch_size,
+            embedding_cfg=config.embedding,
             cache_port=cache_port,
             model_version=self._config.model_version,
             enable_cache=cache_port is not None,
@@ -66,6 +79,18 @@ class IndexService:
     @property
     def collection_name(self) -> str:
         return self._collection
+
+    def _build_embed_fn(self, embedding_model: EmbeddingPort):
+        if not hasattr(embedding_model, "embed"):
+            return None
+
+        def _embed(texts: List[str]) -> List[List[float]]:
+            return embedding_model.embed(texts)
+
+        return _embed
+
+    def _uses_seven_step_pipeline(self) -> bool:
+        return self._strategy == ChunkStrategy.SEVEN_STEP
 
     def _resolve_profile(self, profile: Optional[IndexProfile]) -> IndexProfile:
         if profile is not None:
@@ -80,6 +105,10 @@ class IndexService:
 
     def _dedupe_chunk_list(self, chunks: List[Chunk]) -> List[Chunk]:
         if not chunks:
+            return chunks
+        if self._uses_seven_step_pipeline():
+            for idx, chunk in enumerate(chunks):
+                chunk.chunk_index = idx
             return chunks
 
         if self._config.enable_chunk_dedupe:
@@ -110,6 +139,7 @@ class IndexService:
         tenant_id: str,
         metadata: Optional[Dict[str, Any]] = None,
         profile: Optional[IndexProfile] = None,
+        previous_fingerprints: Optional[Dict[str, str]] = None,
     ) -> IndexResult:
         resolved_profile = self._resolve_profile(profile)
         metadata = dict(metadata or {})
@@ -117,6 +147,12 @@ class IndexService:
         metadata["doc_id"] = doc_id
 
         chunks = self._chunker.chunk(content, doc_id, metadata)
+        if isinstance(self._chunker, SevenStepChunker):
+            parents = self._chunker.get_parent_chunks()
+            if parents:
+                self._parent_store.save(self._collection, doc_id, parents)
+            stats = self._chunker.get_pipeline_stats()
+            metadata["chunk_pipeline_stats"] = stats
         before = len(chunks)
         chunks = self._dedupe_chunk_list(chunks)
         if len(chunks) != before:
@@ -128,18 +164,56 @@ class IndexService:
             )
         self._logger.info("Document %s split into %d chunks", doc_id, len(chunks))
 
-        embeddings = await self._embedder.embed_chunks(chunks, tenant_id)
+        embed_result = await self._embedder.embed_chunks(
+            chunks,
+            tenant_id,
+            previous_fingerprints=previous_fingerprints,
+        )
+        chunks_deleted = 0
+        if self._config.embedding.enable_chunk_incremental:
+            chunks_deleted = await self._delete_orphan_chunks(
+                doc_id,
+                tenant_id,
+                {chunk.chunk_id for chunk in chunks},
+            )
+        if embed_result.skipped_unchanged or embed_result.encoded_count:
+            self._logger.info(
+                "Document %s embed: encoded=%d skipped_unchanged=%d deleted=%d total=%d",
+                doc_id,
+                embed_result.encoded_count,
+                embed_result.skipped_unchanged,
+                chunks_deleted,
+                len(chunks),
+            )
+
         bm25_written = False
-        if self._bm25_index is not None:
+        bm25_needs_update = (
+            embed_result.encoded_count > 0
+            or chunks_deleted > 0
+            or not self._config.embedding.enable_chunk_incremental
+        )
+        if self._bm25_index is not None and bm25_needs_update:
+            bm25_payload = [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "content": chunk.content,
+                    "metadata": {**chunk.metadata, "tenant_id": tenant_id},
+                }
+                for chunk in chunks
+            ]
             await asyncio.to_thread(
                 self._bm25_index.index_chunks,
-                embeddings,
+                bm25_payload,
                 tenant_id,
                 doc_id,
             )
             bm25_written = True
         try:
-            written = await self._write_vectors(embeddings)
+            written = await self._write_vectors(
+                embed_result.to_write,
+                doc_id=doc_id,
+                tenant_id=tenant_id,
+            )
         except (RuntimeError, ConnectionError, OSError, ValueError):
             if bm25_written and self._bm25_index is not None:
                 await asyncio.to_thread(
@@ -163,6 +237,10 @@ class IndexService:
             profile=resolved_profile,
             side_indexes=side_indexes,
             index_version=index_version,
+            chunk_fingerprints=embed_result.fingerprints,
+            chunks_skipped_unchanged=embed_result.skipped_unchanged,
+            chunks_deleted=chunks_deleted,
+            chunks_encoded=embed_result.encoded_count,
         )
 
     async def index_from_ingest(
@@ -171,6 +249,7 @@ class IndexService:
         tenant_id: str,
         doc_id: Optional[str] = None,
         profile: Optional[IndexProfile] = None,
+        previous_fingerprints: Optional[Dict[str, str]] = None,
     ) -> IndexResult:
         if ingest_result.status == IngestStatus.FAILED:
             raise ValueError(f"Cannot index failed ingest: {ingest_result.errors}")
@@ -187,6 +266,7 @@ class IndexService:
             tenant_id=tenant_id,
             metadata=metadata,
             profile=profile,
+            previous_fingerprints=previous_fingerprints,
         )
 
     async def index_documents_batch(
@@ -223,6 +303,7 @@ class IndexService:
                     doc_id,
                     tenant_id,
                 )
+            self._parent_store.delete(self._collection, doc_id)
             self._logger.info(
                 "Deleted document %s from %s (%d chunks)",
                 doc_id,
@@ -286,7 +367,49 @@ class IndexService:
 
         return stats
 
-    async def _write_vectors(self, embeddings: List[Dict[str, Any]]) -> int:
+    async def _delete_orphan_chunks(
+        self,
+        doc_id: str,
+        tenant_id: str,
+        current_chunk_ids: set[str],
+    ) -> int:
+        list_fn = getattr(self._vector_port, "list_ids_by_filter", None)
+        delete_fn = getattr(self._vector_port, "delete_by_ids", None)
+        if not list_fn or not delete_fn:
+            return 0
+        try:
+            existing = await asyncio.to_thread(
+                list_fn,
+                self._collection,
+                {"doc_id": doc_id, "tenant_id": tenant_id},
+            )
+        except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+            self._logger.warning("列举 chunk id 失败 doc=%s: %s", doc_id, exc)
+            return 0
+        orphan_ids = [cid for cid in existing if cid not in current_chunk_ids]
+        if not orphan_ids:
+            return 0
+        try:
+            deleted = await asyncio.to_thread(
+                delete_fn,
+                self._collection,
+                orphan_ids,
+            )
+            self._logger.info(
+                "Deleted %d orphan chunks for doc=%s", deleted, doc_id
+            )
+            return int(deleted)
+        except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+            self._logger.warning("删除 orphan chunk 失败 doc=%s: %s", doc_id, exc)
+            return 0
+
+    async def _write_vectors(
+        self,
+        embeddings: List[Dict[str, Any]],
+        *,
+        doc_id: str = "",
+        tenant_id: str = "",
+    ) -> int:
         records = [
             VectorRecord(
                 id=item["chunk_id"],
@@ -298,11 +421,41 @@ class IndexService:
         ]
         if not records:
             return 0
-        return await asyncio.to_thread(
-            self._vector_port.upsert,
-            self._collection,
-            records,
+        expected = len(records)
+        max_retries = max(1, int(self._config.embedding.write_max_retries))
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                written = await asyncio.to_thread(
+                    self._vector_port.upsert,
+                    self._collection,
+                    records,
+                )
+                if written != expected:
+                    raise RuntimeError(
+                        f"向量写入数量不一致: expected={expected} written={written}"
+                    )
+                return written
+            except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
+                last_exc = exc
+                self._logger.warning(
+                    "向量写入失败 (%d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    exc,
+                )
+                if attempt + 1 < max_retries:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        assert last_exc is not None
+        append_embedding_dlq(
+            self._config.embedding.dlq_path,
+            collection=self._collection,
+            doc_id=doc_id,
+            tenant_id=tenant_id,
+            expected=expected,
+            error=str(last_exc),
         )
+        raise last_exc
 
     async def _bump_index_version(self, tenant_id: str) -> Optional[int]:
         if self._cache_port is None:

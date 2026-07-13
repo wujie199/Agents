@@ -209,18 +209,37 @@ class ExternalMemoryProvider(Protocol):
 
 ## 7. LangGraph 组件映射
 
+**图拓扑（`app/workflows/chat/graph_def.py`）**
+
+```
+START → prepare → agent → compress(L0) → persist(L2) → END
+```
+
+| 节点 | Hermes / 记忆职责 | 代码 |
+|------|-------------------|------|
+| **prepare** | L1 快照、L2 history、Router 预取、RAG、L0 注入 | `build_turn_messages` |
+| **agent** | ReAct / 直连 LLM；Path B 可调 L2/L3/L4 工具 | `create_react_agent` |
+| **compress** | L0 Zone 3 压缩（瞬态 `_l0_context_state`） | `maybe_compress_turn_context` |
+| **persist** | L2 `persist_turn` 真相源 | `persist_user_and_assistant` |
+
+**GraphState（`app/agents/memory/memory_graph_state.py`）**
+
+- 必填：`memory_snapshot_hash`, `evidences_summary`, `memory_summary`, `evidence_count`, `rag_empty`
+- 工作记忆：`retrieval_intent`, `pending_remember`, `pending_memory_delta`, `memory_path`（path_a | path_b）, `l0_applied`
+
 - **L1** → `langgraph.store.BaseStore` + 会话启动加载到 system prompt
-- **L2** → 独立 `SessionArchive` 表 + `session_search` 工具
+- **L2** → 独立 `SessionArchive` 表 + `session_search` / Hermes `discovery|scroll|read|browse`
 - **L2 辅助** → `Checkpointer` 保存 `GraphState` 快照
 - **L3** → Store namespace `("skills", tenant_id)` 或 `skills/` 目录
 - **L4** → 可插拔 `ExternalMemoryProvider` 注册到 `MemoryPort`
-- **工作记忆** → `GraphState` 字段（`document_title`, `search_batch`, `observation` 等）
+- **L0** → 独立 compress 节点；不刷新 L1 快照
+- **工作记忆** → `GraphState` + `RunContext.extra`（Router intent、pending L1）
 
 ### GraphState 建议扩展
 
 - `memory_snapshot_hash: NotRequired[str]`
-- `pending_memory_delta: NotRequired[list]`
-- `session_id`, `user_id`, `tenant_id`：必填贯穿全图
+- `pending_memory_delta: NotRequired[list]` — 会话内 L1 待写入 delta（与 HITL pending 对齐）
+- `session_id`, `user_id`, `tenant_id`：必填贯穿全图（经 `RunContext.request`）
 
 ---
 
@@ -299,8 +318,19 @@ class MemoryPort(Protocol):
 
 > **一期见 `ARCHITECTURE.md` 1.3.1、15.1 S7**；Skill 目录 **ADR-1**：`skills/published/`。
 
-1. 实现 L1 Store 加载 + 固定 system 前缀 + `memory_snapshot_hash`
-2. 实现 L2 `persist_turn`（SQLite）；`session_search` 为二期
-3. Checkpointer 与 Session Archive 职责分离；并行 Send 不 merge 全量 messages 进父 thread
-4. （二期）L3 `skill_search` + `skills/published/` + ToolPort 联动
-5. （三期）L4 External Provider + CRM 适配器
+| Phase | 能力 | 状态 | 代码入口 |
+|-------|------|------|----------|
+| 1 | L1 Store 加载 + 固定前缀 + `memory_snapshot_hash` | ✅ | `HotMemoryFileAdapter` / `HotMemoryRelationalAdapter` / `HotMemoryLangGraphStoreAdapter` |
+| 2 | L2 `persist_turn` + `session_search` Hermes 四模式 | ✅ | `MemoryPortAdapter`, `l2_session_search.py` |
+| 3 | Checkpointer 与 Session Archive 分离 | ✅ | `ENTERPRISE_CHAT.md` §4 |
+| 4 | L3 `skill_search` + `skills/published/` | ✅ | `SkillMemoryAdapter` |
+| 5 | L4 External Provider | ✅（可选启用） | `external_factory.py`, `l4_http` profile |
+| — | GraphState `pending_memory_delta` + finalize 闭环 | ✅ | `memory_graph_state.py`, `react_loop.end_agent_session` |
+| — | L1 nudge 周期性抽取 | ✅ | `l1_nudge.py` |
+| — | 记忆 golden eval | ✅ | `document/memory/evaluation/`, `scripts/memory_eval.py` |
+
+**L1 存储后端**（`config/memory.yml` → `l1.l1_store_backend`）：
+
+- `file` — 开发默认
+- `relational` — PG/SQLite `hot_memory_docs`
+- `langgraph` — LangGraph `BaseStore` namespace `("memory", tenant_id)`；生产与 `DATABASE_URL` 共用 PostgresStore

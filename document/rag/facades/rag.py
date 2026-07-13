@@ -11,6 +11,7 @@ from core.ports.rag.embedding import EmbeddingPort
 from core.ports.storage.cache import CachePort
 from core.ports.storage.vector import VectorPort
 
+from document.rag.application.embedding.collection import effective_collection_name
 from document.rag.config.pipeline import RagPipelineConfig
 from document.rag.application.retrieval.rerank_utils import apply_rerank
 from document.rag.pipelines.retrieval_pipeline import (
@@ -53,7 +54,7 @@ class RAGPortAdapter:
         self._router = router
         self._bm25_index = bm25_index
         self._query_rewriter = query_rewriter
-        self._collection = self._config.collection_name
+        self._collection = effective_collection_name(self._config)
         self._default_top_k = default_top_k or self._config.default_top_k
         self._rerank_top_n = rerank_top_n or self._config.rerank_top_n
         self._enable_cache = (
@@ -179,6 +180,7 @@ class RAGPortAdapter:
             rerank_top_n=resolved.rerank_top_n,
             rerank_model=self._rerank_model,
             logger=self._logger,
+            embedding_cfg=self._config.embedding,
         )
 
         # 5. 缓存写入
@@ -240,7 +242,9 @@ class RAGPortAdapter:
         queries = [r.query for r in requests]
 
         try:
-            query_vectors = await get_embeddings(queries, self._embedding_model)
+            query_vectors = await get_embeddings(
+                queries, self._embedding_model, embedding_cfg=self._config.embedding
+            )
             results: List[EvidenceBundle] = []
 
             for request, query_vector in zip(requests, query_vectors):

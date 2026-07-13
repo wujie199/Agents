@@ -10,7 +10,10 @@ from typing import Any, Optional
 
 from core.composition.run_context import RunContext
 
+from app.agents.memory.memory_graph_state import read_graph_memory_snapshot
 from app.agents.orchestration.chat_config import ObservabilityConfig, load_observability_config
+
+_GRAPH_NODES = ("prepare", "agent", "compress", "persist")
 
 
 def begin_turn_observability(ctx: RunContext) -> None:
@@ -102,6 +105,7 @@ def collect_turn_observability(
         "node_timing_summary": summary,
         "tool_events": tool_events,
         "turn_audit": turn_audit,
+        "graph_memory_snapshot": read_graph_memory_snapshot(ctx),
     }
 
 
@@ -113,7 +117,7 @@ def format_observability_markdown(snapshot: dict[str, Any]) -> str:
     if trace_id:
         parts.append(f"- **trace_id**: `{trace_id}`")
 
-    # ── 三节点耗时 ──
+    # ── LangGraph 节点耗时 ──
     summary = snapshot.get("node_timing_summary")
     nodes = (summary or {}).get("nodes") if isinstance(summary, dict) else None
     if nodes:
@@ -135,13 +139,13 @@ def format_observability_markdown(snapshot: dict[str, Any]) -> str:
         timing = snapshot.get("node_timing") or []
         graph_nodes = [
             t for t in timing
-            if isinstance(t, dict) and t.get("node") in ("prepare", "agent", "persist")
+            if isinstance(t, dict) and t.get("node") in _GRAPH_NODES
         ]
         if graph_nodes:
             parts.append("\n#### ⏱ LangGraph 节点\n")
             parts.append("| 节点 | 耗时 | 慢 |")
             parts.append("|------|------|-----|")
-            for t in graph_nodes[-3:]:
+            for t in graph_nodes[-len(_GRAPH_NODES):]:
                 parts.append(
                     f"| {t.get('node')} | {_fmt_ms(t.get('duration_ms'))} "
                     f"| {'是' if t.get('slow') else '否'} |"
@@ -171,7 +175,7 @@ def format_observability_markdown(snapshot: dict[str, Any]) -> str:
     parts.append("\n#### 📋 审计（本轮）\n")
     if not audit:
         parts.append(
-            "_无审计记录（需 `observability.audit_persist: true` 且对话跑完 prepare/agent/persist）_"
+            "_无审计记录（需 `observability.audit_persist: true` 且对话跑完 prepare/agent/compress/persist）_"
         )
     else:
         parts.append("| 节点 | 耗时 | 错误 | 内容 hash |")
@@ -184,5 +188,24 @@ def format_observability_markdown(snapshot: dict[str, Any]) -> str:
                 f"| {row.get('node', '?')} | {_fmt_ms(row.get('duration_ms'))} "
                 f"| {err or '—'} | {hash_bits} |"
             )
+
+    # ── Hermes 图状态快照 ──
+    gm = snapshot.get("graph_memory_snapshot") or {}
+    if isinstance(gm, dict) and gm:
+        parts.append("\n#### 🧠 Hermes 图状态\n")
+        if gm.get("retrieval_intent"):
+            parts.append(f"- **检索意图**: `{gm.get('retrieval_intent')}`")
+        if gm.get("memory_path"):
+            parts.append(f"- **记忆路径**: `{gm.get('memory_path')}`")
+        if "l0_applied" in gm:
+            parts.append(
+                "- **L0 压缩**: "
+                + ("✅ 已触发" if gm.get("l0_applied") else "⬜ 未触发")
+            )
+        if gm.get("pending_remember"):
+            parts.append(f"- **待写入 L1**: {str(gm.get('pending_remember'))[:120]}")
+        deltas = gm.get("pending_memory_delta")
+        if isinstance(deltas, list) and deltas:
+            parts.append(f"- **pending delta**: {len(deltas)} 条")
 
     return "\n".join(parts)

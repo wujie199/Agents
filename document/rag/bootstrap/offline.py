@@ -9,6 +9,7 @@ _log = logging.getLogger("document.rag.bootstrap.offline")
 from core.ports.index import IndexProfile
 from document.rag.config import RagPipelineConfig, load_rag_pipeline_config
 from document.rag.components.storage.registry import build_bm25_index
+from document.rag.application.embedding.collection import effective_collection_name
 from document.rag.application.indexing.service import IndexService
 from document.rag.application.ingest_factory import build_ingest_pipeline
 from document.rag.bootstrap.model_bridge import apply_models_to_rag_config
@@ -21,6 +22,22 @@ def resolve_offline_embedding(
 ) -> Any:
     """离线建库 embedding（见 config/models.yml roles.embedding）。"""
     return resolve_embedding_model(models, cfg)
+
+
+def create_offline_embedding_cache(
+    data_dir: Path,
+    cfg: RagPipelineConfig,
+) -> Any | None:
+    """离线 embedding 文件缓存（enable_embedding_cache_read 时启用）。"""
+    if not cfg.embedding.enable_embedding_cache_read:
+        return None
+    from document.rag.components.storage.embedding_file_cache import (
+        EmbeddingFileCacheAdapter,
+    )
+
+    cache_dir = data_dir / "embedding_cache"
+    _log.info("离线 embedding 缓存目录: %s", cache_dir)
+    return EmbeddingFileCacheAdapter(cache_dir)
 
 
 def create_offline_index_service(
@@ -67,14 +84,21 @@ def create_offline_index_service(
     if enable_bm25:
         bm25_index = build_bm25_index(data_dir, cfg)
 
+    cache_port = create_offline_embedding_cache(data_dir, cfg)
+
     index_service = IndexService(
         vector_port=vector_port,
         embedding_model=embedding,
         config=cfg,
-        cache_port=None,
+        cache_port=cache_port,
         sql_port=sql_port,
         graph_port=graph_port,
         bm25_index=bm25_index,
+    )
+    _log.info(
+        "IndexService collection=%s chroma=%s",
+        effective_collection_name(cfg),
+        chroma_dir,
     )
     return index_service, chroma_dir
 

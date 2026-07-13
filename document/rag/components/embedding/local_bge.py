@@ -38,7 +38,7 @@ class LocalBgeEmbedding:
         require_mounted_volume(
             self._model_dir,
             purpose="RAG 本地 embedding（bge-small-zh-v1.5）",
-            env_hint="可在 config/rag_pipeline.yml 的 embedding.model_path 或 RAG_EMBEDDING_MODEL 指定路径",
+            env_hint="可在 config/rag.yml 的 embedding 段或 RAG_EMBEDDING_MODEL 指定路径",
         )
 
         model_path = Path(self._model_dir)
@@ -62,6 +62,15 @@ class LocalBgeEmbedding:
     @property
     def model_dir(self) -> str:
         return self._model_dir
+
+    def token_length(self, text: str) -> int:
+        tokenizer = self._model.tokenizer
+        return len(tokenizer.encode(text, add_special_tokens=False))
+
+    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        tokenizer = self._model.tokenizer
+        token_ids = tokenizer.encode(text, add_special_tokens=False)[:max_tokens]
+        return tokenizer.decode(token_ids, skip_special_tokens=True)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:

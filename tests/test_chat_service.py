@@ -80,10 +80,17 @@ async def test_stream_token_mode_direct():
     with patch(
         "app.agents.orchestration.chat_service.build_turn_messages",
         new=AsyncMock(
-            return_value=([{"role": "user", "content": "hi"}], 1, False, "abc123")
+            return_value=(
+                [{"role": "user", "content": "hi"}],
+                1,
+                False,
+                "abc123",
+                [],
+                {},
+            )
         ),
     ), patch(
-        "app.agents.orchestration.chat_service.stream_llm_text",
+        "app.agents.orchestration.chat_service.stream_llm_chunks",
     ) as mock_stream, patch(
         "app.agents.orchestration.chat_service.persist_user_and_assistant",
         new=AsyncMock(),
@@ -92,8 +99,8 @@ async def test_stream_token_mode_direct():
         new=AsyncMock(return_value=[]),
     ):
         async def _gen(*_a, **_k):
-            yield "你"
-            yield "好"
+            yield ("你", "")
+            yield ("好", "")
 
         mock_stream.return_value = _gen()
 

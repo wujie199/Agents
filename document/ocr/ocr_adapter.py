@@ -248,12 +248,11 @@ def _dt_polys_from_det_result(res: Any) -> list[Any]:
 
 
 def _sort_boxes(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def sort_key(box: dict[str, Any]) -> tuple:
-        order = box.get("order")
-        coord = box.get("coordinate") or [0, 0, 0, 0]
-        return (1, coord[1], coord[0]) if order is None else (0, order)
+    from document.ocr.reading_order import sort_boxes_reading_order
 
-    return sorted(boxes, key=sort_key)
+    wrapped = [dict(b) for b in boxes]
+    sorted_boxes = sort_boxes_reading_order(wrapped)
+    return sorted_boxes
 
 
 def _poly_to_bbox(poly: Any) -> tuple[int, int, int, int]:
@@ -750,6 +749,38 @@ def process_page(
         layout_json = str(layout_json_path.resolve())
 
     boxes = _sort_boxes(_boxes_from_layout_result(layout_res))
+    # #region agent log
+    try:
+        from document.rag.shared.debug_trace import trace_pipeline_step
+
+        trace_pipeline_step(
+            "ocr",
+            f"page_{page_index:04d}_layout",
+            f"第 {page_index + 1} 页版面分析",
+            data={
+                "page_index": page_index,
+                "image": str(image_path),
+                "layout_boxes": len(boxes),
+                "labels": [b.get("label") for b in boxes[:20]],
+            },
+            artifact={
+                "page_index": page_index,
+                "layout_json": layout_json,
+                "boxes": [
+                    {
+                        "index": i,
+                        "label": b.get("label"),
+                        "score": b.get("score"),
+                        "coordinate": b.get("coordinate"),
+                    }
+                    for i, b in enumerate(boxes)
+                ],
+            },
+            hypothesis_id="H2",
+        )
+    except ImportError:
+        pass
+    # #endregion
     page_im = Image.open(image_path)
     page_im.load()
 
@@ -835,4 +866,27 @@ def process_page(
     }
     if layout_json:
         out["layout_json"] = layout_json
+    # #region agent log
+    try:
+        from document.rag.shared.debug_trace import summarize_ocr_regions, trace_pipeline_step
+
+        trace_pipeline_step(
+            "ocr",
+            f"page_{page_index:04d}_regions",
+            f"第 {page_index + 1} 页区域识别完成",
+            data={
+                "page_index": page_index,
+                "regions": len(regions),
+                "elapsed_s": round(elapsed, 2),
+            },
+            artifact={
+                "page_index": page_index,
+                "elapsed_s": round(elapsed, 2),
+                "regions": summarize_ocr_regions(regions),
+            },
+            hypothesis_id="H2",
+        )
+    except ImportError:
+        pass
+    # #endregion
     return out

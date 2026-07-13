@@ -18,6 +18,7 @@ from document.rag.components.ingest.word_to_pdf import (
     convert_to_pdf,
     needs_pdf_conversion,
 )
+from document.rag.shared.debug_trace import debug_trace, preview_text, sample_texts, set_trace_context
 
 logger = logging.getLogger("ingest.ocr_processor")
 
@@ -42,9 +43,13 @@ class OcrProcessorIngestAdapter:
         enable_formula: bool = True,
         formula_model_name: Optional[str] = None,
         max_attempts: int = 3,
-        fast_mode: bool = True,
+        layout_threshold: float = 0.5,
+        layout_score_threshold: float = 0.5,
+        fast_mode: bool = False,
         table_e2e: bool = False,
         enable_mkldnn: bool = True,
+        enable_pdf_routing: bool = True,
+        pdf_threads: int = 1,
     ):
         self._pdf_dpi = pdf_dpi
         self._use_layout = use_layout
@@ -57,9 +62,13 @@ class OcrProcessorIngestAdapter:
         self._enable_formula = enable_formula
         self._formula_model_name = formula_model_name
         self._max_attempts = max_attempts
+        self._layout_threshold = layout_threshold
+        self._layout_score_threshold = layout_score_threshold
         self._fast_mode = fast_mode
         self._table_e2e = table_e2e
         self._enable_mkldnn = enable_mkldnn
+        self._enable_pdf_routing = enable_pdf_routing
+        self._pdf_threads = max(1, pdf_threads)
         self._processor = None
         self._temp_dirs: List[str] = []
 
@@ -82,9 +91,13 @@ class OcrProcessorIngestAdapter:
                 "preprocess_mode": self._preprocess_mode,
                 "enable_formula": self._enable_formula,
                 "max_attempts": self._max_attempts,
+                "layout_threshold": self._layout_threshold,
+                "layout_score_threshold": self._layout_score_threshold,
                 "fast_mode": self._fast_mode,
                 "table_e2e": self._table_e2e,
                 "enable_mkldnn": self._enable_mkldnn,
+                "enable_pdf_routing": self._enable_pdf_routing,
+                "pdf_threads": self._pdf_threads,
             }
             if self._model_root:
                 kwargs["model_root"] = self._model_root
@@ -172,6 +185,8 @@ class OcrProcessorIngestAdapter:
             doc_meta = getattr(ocr_result, "metadata", {}) or {}
             if doc_meta.get("document_ir"):
                 metadata["document_ir"] = doc_meta["document_ir"]
+            if doc_meta.get("pdf_classification"):
+                metadata["pdf_classification"] = doc_meta["pdf_classification"]
             if doc_meta.get("qc_summary"):
                 metadata["qc_summary"] = doc_meta["qc_summary"]
         else:
@@ -220,10 +235,26 @@ class OcrProcessorIngestAdapter:
         metadata = dict(metadata or {})
         metadata["doc_id"] = doc_id
         metadata["source_path"] = file_path
+        set_trace_context(doc_id=doc_id, source_path=file_path, phase="ingest")
 
         doc_format = self._detect_format(file_path)
         metadata["doc_format"] = doc_format.value
         ext = Path(file_path).suffix.lower()
+
+        # #region agent log
+        debug_trace(
+            "ingest/ocr_processor.py:ingest_from_path:start",
+            "OCR 摄取开始",
+            data={
+                "doc_id": doc_id,
+                "source_path": file_path,
+                "ext": ext,
+                "doc_format": doc_format.value,
+                "word_to_pdf": self._word_to_pdf,
+            },
+            hypothesis_id="H1",
+        )
+        # #endregion
 
         try:
             if ext in _PLAIN_TEXT_EXTENSIONS or doc_format in (
@@ -233,6 +264,18 @@ class OcrProcessorIngestAdapter:
                 content = self._read_plain_text(file_path)
                 metadata["ingest_backend"] = "plain_text"
                 metadata["ocr_skipped"] = True
+                # #region agent log
+                debug_trace(
+                    "ingest/ocr_processor.py:plain_text",
+                    "纯文本直读完成",
+                    data={
+                        "doc_id": doc_id,
+                        "chars": len(content),
+                        "preview": preview_text(content, 500),
+                    },
+                    hypothesis_id="H1",
+                )
+                # #endregion
                 return IngestResult(
                     content=content,
                     metadata=metadata,
@@ -247,8 +290,32 @@ class OcrProcessorIngestAdapter:
                 )
 
             ocr_input = self._prepare_ocr_path(file_path, doc_format)
-            dpi = config.dpi or self._pdf_dpi
+            # rag.yml pdf_dpi 为默认；仅当调用方显式传入非默认 dpi 时才覆盖
+            default_port_dpi = IngestConfig().dpi
+            dpi = self._pdf_dpi
+            if (
+                config is not None
+                and config.dpi not in (None, 0)
+                and config.dpi != default_port_dpi
+            ):
+                dpi = config.dpi
             logger.info("OCR 摄取 %s via %s (dpi=%s)", doc_id, ocr_input, dpi)
+
+            # #region agent log
+            debug_trace(
+                "ingest/ocr_processor.py:ocr_prepare",
+                "OCR 输入路径就绪",
+                data={
+                    "doc_id": doc_id,
+                    "ocr_input": ocr_input,
+                    "converted_from_word": ocr_input != file_path,
+                    "dpi": dpi,
+                    "use_layout": self._use_layout,
+                    "enable_pdf_routing": self._enable_pdf_routing,
+                },
+                hypothesis_id="H1",
+            )
+            # #endregion
 
             processor = self._get_processor()
             ocr_result = processor.process(
@@ -257,10 +324,40 @@ class OcrProcessorIngestAdapter:
                 use_ocr=True,
                 pdf_dpi=dpi,
             )
-            return self._ocr_result_to_ingest(ocr_result, metadata, file_path)
+            result = self._ocr_result_to_ingest(ocr_result, metadata, file_path)
+            # #region agent log
+            page_previews = sample_texts(
+                [p.get("content", "") for p in (result.pages or [])], n=2, max_chars=300
+            )
+            debug_trace(
+                "ingest/ocr_processor.py:ocr_done",
+                "OCR 摄取完成",
+                data={
+                    "doc_id": doc_id,
+                    "status": result.status.value,
+                    "total_chars": len(result.content or ""),
+                    "total_pages": result.metadata.get("total_pages"),
+                    "table_count": result.metadata.get("table_count"),
+                    "has_document_ir": "document_ir" in result.metadata,
+                    "pdf_classification": result.metadata.get("pdf_classification"),
+                    "content_preview": preview_text(result.content or "", 600),
+                    "page_previews": page_previews,
+                },
+                hypothesis_id="H2",
+            )
+            # #endregion
+            return result
 
         except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
             logger.error("OCR 摄取失败 %s: %s", doc_id, exc)
+            # #region agent log
+            debug_trace(
+                "ingest/ocr_processor.py:ocr_error",
+                "OCR 摄取失败",
+                data={"doc_id": doc_id, "error": str(exc)},
+                hypothesis_id="H1",
+            )
+            # #endregion
             return IngestResult(
                 content="",
                 metadata=metadata,

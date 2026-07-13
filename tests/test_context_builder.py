@@ -6,8 +6,10 @@ import pytest
 
 from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import (
+    _collect_recent_user_messages,
     compress_history_for_knowledge,
     is_cross_session_recall,
+    is_meta_recall_query,
     is_name_intro_query,
     is_recall_query,
     prefetch_session_recall,
@@ -29,6 +31,25 @@ def test_should_run_rag_gates_greeting():
 def test_is_recall_query():
     assert is_recall_query("之前问过你什么问题")
     assert not is_recall_query("今天天气怎么样")
+
+
+def test_is_meta_recall_query():
+    assert is_meta_recall_query("之前问过你什么问题")
+    assert is_meta_recall_query("我们聊过什么")
+    assert not is_meta_recall_query("上次说的清洁方案怎么样了")
+    assert not is_meta_recall_query("之前说过什么品牌")
+    assert not is_meta_recall_query("如何选择扫地机器人")
+
+
+def test_collect_recent_user_messages_dedupes():
+    rows = [
+        {"role": "user", "content": "a", "ts": "2026-07-01T10:00:00"},
+        {"role": "assistant", "content": "x", "ts": "2026-07-01T10:01:00"},
+        {"role": "user", "content": "b", "ts": "2026-07-02T10:00:00"},
+        {"role": "user", "content": "a", "ts": "2026-07-02T11:00:00"},
+    ]
+    out = _collect_recent_user_messages(rows, limit=3, dedupe=True)
+    assert [r["content"] for r in out] == ["b", "a"]
 
 
 def test_cross_session_recall_scope():
@@ -101,14 +122,20 @@ async def test_prepare_session_context_no_llm():
 
 
 @pytest.mark.asyncio
-async def test_prefetch_session_recall():
+async def test_prefetch_session_recall_meta_uses_recent_turns():
     from unittest.mock import AsyncMock, MagicMock
 
     from core.composition.run_context import RunContext
     from core.domain.context import RequestContext
 
     memory = MagicMock()
-    memory.session_search = AsyncMock(return_value="之前讨论过扫地机器人")
+    memory.session_search = AsyncMock(return_value="semantic hit")
+    memory.list_recent_turns = AsyncMock(
+        return_value=[
+            {"role": "user", "content": "清洁保养机身应注意什么", "ts": "2026-07-02T23:39:00"},
+            {"role": "user", "content": "之前问过你什么问题", "ts": "2026-06-04T22:44:00"},
+        ]
+    )
     ctx = RunContext(
         request=RequestContext(
             tenant_id="t",
@@ -119,10 +146,47 @@ async def test_prefetch_session_recall():
         ),
         memory=memory,
     )
-    cfg = ChatAgentConfig(session_search_prefetch=True)
+    cfg = ChatAgentConfig(
+        session_search_prefetch=True,
+        meta_recall_recent_list=True,
+        meta_recall_recent_limit=5,
+    )
     out = await prefetch_session_recall(ctx, "之前问过什么", cfg, enabled=True)
+    assert "会话回忆·最近提问" in out
+    assert "清洁保养" in out
+    assert "semantic hit" not in out
+    memory.list_recent_turns.assert_awaited_once()
+    memory.session_search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_session_recall_topic_uses_semantic_search():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core.composition.run_context import RunContext
+    from core.domain.context import RequestContext
+
+    memory = MagicMock()
+    memory.session_search = AsyncMock(return_value="之前讨论过扫地机器人")
+    memory.list_recent_turns = AsyncMock(return_value=[])
+    ctx = RunContext(
+        request=RequestContext(
+            tenant_id="t",
+            user_id="u",
+            session_id="s",
+            trace_id="tr",
+            channel="test",
+        ),
+        memory=memory,
+    )
+    cfg = ChatAgentConfig(session_search_prefetch=True, meta_recall_recent_list=True)
+    out = await prefetch_session_recall(
+        ctx, "上次说的清洁方案怎么样了", cfg, enabled=True
+    )
     assert "会话回忆" in out
+    assert "扫地机器人" in out
     memory.session_search.assert_awaited_once()
+    memory.list_recent_turns.assert_not_awaited()
 
 
 def test_is_name_intro_query():

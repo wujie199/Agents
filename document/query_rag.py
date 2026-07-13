@@ -110,6 +110,7 @@ async def run_query(
         rerank_min_score=rerank_min_score,
         tags=tags,
         tag_match=tag_match,
+        parent_store=stack.parent_store,
     )
     _print_results(query, bundle)
     return 0
@@ -135,7 +136,7 @@ async def run_repl(
     print("RAG 查询 REPL（空行退出）")
     print(f"  data_dir={data_dir}")
     print(f"  chroma={stack.chroma_dir}")
-    print(f"  collection={stack.config.collection_name}")
+    print(f"  collection={stack.collection}")
     print(f"  hybrid={stack.config.retrieval.enable_hybrid}")
     if tags:
         print(f"  tags={tags}  tag_match={tag_match}")
@@ -160,6 +161,7 @@ async def run_repl(
             rerank_min_score=rerank_min_score,
             tags=tags,
             tag_match=tag_match,
+            parent_store=stack.parent_store,
         )
         _print_results(query, bundle)
     return 0

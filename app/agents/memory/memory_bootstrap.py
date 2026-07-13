@@ -131,4 +131,7 @@ async def bootstrap_memory_runtime(
 
     if isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra["memory_bootstrap"] = report
+        ctx.extra["session_search_default_hermes_mode"] = str(
+            mem_cfg.get("session_search_default_hermes_mode") or "discovery"
+        ).lower()
     return report

@@ -26,6 +26,10 @@ class IndexResult:
     profile: IndexProfile = IndexProfile.VECTOR_ONLY
     side_indexes: Dict[str, bool] = field(default_factory=dict)
     index_version: Optional[Any] = None
+    chunk_fingerprints: Dict[str, str] = field(default_factory=dict)
+    chunks_skipped_unchanged: int = 0
+    chunks_deleted: int = 0
+    chunks_encoded: int = 0
 
     @classmethod
     def from_dict(

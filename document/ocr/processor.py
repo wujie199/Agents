@@ -21,10 +21,39 @@ os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
 _OCR_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _OCR_DIR.parents[1]
+
+
+def _bootstrap_paddlex_env() -> None:
+    """离线 Paddle 版面可视化：缓存目录 + 本地字体，避免下载 PingFang 失败。"""
+    cache_home = _REPO_ROOT / "data" / "rag_offline" / ".paddlex"
+    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache_home))
+    os.environ.setdefault(
+        "MPLCONFIGDIR",
+        str(_REPO_ROOT / "data" / "rag_offline" / ".matplotlib"),
+    )
+    if os.environ.get("PADDLE_PDX_LOCAL_FONT_FILE_PATH"):
+        return
+    bundled = cache_home / "fonts" / "PingFang-SC-Regular.ttf"
+    if bundled.is_file():
+        os.environ["PADDLE_PDX_LOCAL_FONT_FILE_PATH"] = str(bundled)
+        return
+    for candidate in (
+        Path("/Library/Fonts/Arial Unicode.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+        Path("/System/Library/Fonts/STHeiti Light.ttc"),
+    ):
+        if candidate.is_file():
+            os.environ["PADDLE_PDX_LOCAL_FONT_FILE_PATH"] = str(candidate)
+            return
+
+
+_bootstrap_paddlex_env()
+
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from document.ocr.document_ir import document_to_markdown
+from document.ocr.labels import DROP_LABELS
 from document.ocr.load_ocr import (
     DEFAULT_TEST_PDF,
     FORMULA_MODEL_NAME,
@@ -179,6 +208,8 @@ def _page_ir_to_ocr_result(
     text_parts: List[str] = []
 
     for raw in page.get("regions") or []:
+        if str(raw.get("label") or "") in DROP_LABELS:
+            continue
         layout = _region_ir_to_layout(raw)
         regions.append(layout)
         if layout.region_type == "table" and layout.html:
@@ -237,6 +268,8 @@ def _document_ir_to_pdf_result(
             "pipeline_version": document.get("pipeline_version"),
             "qc_summary": qc_summary,
             "document_ir_schema": document.get("schema"),
+            "document_ir": document,
+            "pdf_classification": document.get("pdf_classification"),
         },
     )
 
@@ -254,16 +287,19 @@ class OCRProcessor:
         layout_model_name: str = "PP-DocLayoutV3",
         ocr_model_name: str = "PP-OCRv5_server_rec",
         use_table_recognition: bool = True,
-        fast_mode: bool = True,
+        fast_mode: bool = False,
         preprocess_mode: str = "auto",
         enable_formula: bool = True,
         formula_model_name: Optional[str] = None,
         max_attempts: int = 3,
+        layout_threshold: float = 0.5,
+        layout_score_threshold: float = 0.5,
         rec_batch_size: int = 8,
         crop_threads: int = 4,
         enable_mkldnn: bool = True,
         table_e2e: bool = False,
-        pdf_threads: int = 2,
+        pdf_threads: int = 1,
+        enable_pdf_routing: bool = True,
     ):
         if model_root:
             root = get_model_root(model_root)
@@ -282,13 +318,15 @@ class OCRProcessor:
         self.preprocess_mode = preprocess_mode
         self.enable_formula = enable_formula
         self.pdf_threads = pdf_threads
+        self.enable_pdf_routing = enable_pdf_routing
         self.layout_model_name = layout_model_name
         self.ocr_model_name = ocr_model_name
 
         self._cfg = PipelineConfig(
             model_root=root,
             device=self.device,
-            threshold=0.5,
+            threshold=layout_threshold,
+            layout_score_threshold=layout_score_threshold,
             fast=fast_mode,
             rec_batch_size=max(1, rec_batch_size),
             crop_threads=max(1, crop_threads),
@@ -320,12 +358,82 @@ class OCRProcessor:
         *,
         dpi: int,
         max_pages: Optional[int] = None,
+        enable_pdf_routing: bool = True,
     ) -> Dict[str, Any]:
         scratch_root = Path(tempfile.mkdtemp(prefix="ocr_scratch_"))
         self._temp_dirs.append(str(scratch_root))
         pages_dir = scratch_root / "pages"
         layout_out = None if self.fast_mode else scratch_root / "layout"
         crops_dir = None if self.fast_mode else scratch_root / "crops"
+        work_root = scratch_root / "work"
+
+        if source.suffix.lower() == ".pdf" and enable_pdf_routing:
+            from document.ocr.pdf_router import process_pdf_with_routing
+
+            # #region agent log
+            try:
+                from document.rag.shared.debug_trace import debug_trace
+
+                debug_trace(
+                    "ocr/processor.py:_run_pipeline",
+                    "PDF 混合路由开始",
+                    data={"source": str(source), "dpi": dpi, "max_pages": max_pages},
+                    hypothesis_id="H2",
+                )
+            except ImportError:
+                pass
+            # #endregion
+
+            def _ocr_page(**kwargs: Any) -> Dict[str, Any]:
+                scratch = kwargs.get("scratch_dir")
+                if scratch is not None:
+                    scratch = Path(scratch)
+                    scratch.mkdir(parents=True, exist_ok=True)
+                return self._pipeline.process_single_page(
+                    image_path=kwargs["image_path"],
+                    page_index=kwargs["page_index"],
+                    layout_out=kwargs.get("layout_out"),
+                    crops_dir=kwargs.get("crops_dir"),
+                    scratch_dir=scratch or (work_root / f"page_{kwargs['page_index']:04d}"),
+                )
+
+            document, _classification = process_pdf_with_routing(
+                source,
+                ocr_page_fn=_ocr_page,
+                dpi=dpi,
+                pdf_threads=self.pdf_threads,
+                max_pages=max_pages,
+                layout_out=layout_out,
+                crops_dir=crops_dir,
+                scratch_root=work_root,
+            )
+            document["_plain_markdown"] = document_to_markdown(
+                document, title=source.name
+            )
+            # #region agent log
+            try:
+                from document.rag.shared.debug_trace import debug_trace, preview_text
+
+                pages = document.get("pages") or []
+                debug_trace(
+                    "ocr/processor.py:_run_pipeline:pdf_routed",
+                    "PDF 路由 + OCR 完成",
+                    data={
+                        "source": str(source),
+                        "pages": len(pages),
+                        "regions_total": sum(len(p.get("regions") or []) for p in pages),
+                        "classification": document.get("classification"),
+                        "markdown_chars": len(document.get("_plain_markdown") or ""),
+                        "markdown_preview": preview_text(
+                            document.get("_plain_markdown") or "", 500
+                        ),
+                    },
+                    hypothesis_id="H2",
+                )
+            except ImportError:
+                pass
+            # #endregion
+            return document
 
         image_paths = resolve_image_paths(
             source,
@@ -340,11 +448,37 @@ class OCRProcessor:
             source=source,
             layout_out=layout_out,
             crops_dir=crops_dir,
-            scratch_root=scratch_root / "work",
+            scratch_root=work_root,
         )
+        from document.ocr.ir_postprocess import postprocess_document_ir
+
+        document = postprocess_document_ir(document)
         document["_plain_markdown"] = document_to_markdown(
             document, title=source.name
         )
+        # #region agent log
+        try:
+            from document.rag.shared.debug_trace import debug_trace, preview_text
+
+            pages = document.get("pages") or []
+            debug_trace(
+                "ocr/processor.py:_run_pipeline:image_path",
+                "逐页 OCR + IR 后处理完成",
+                data={
+                    "source": str(source),
+                    "pages": len(pages),
+                    "regions_total": sum(len(p.get("regions") or []) for p in pages),
+                    "postprocess": document.get("postprocess"),
+                    "markdown_chars": len(document.get("_plain_markdown") or ""),
+                    "markdown_preview": preview_text(
+                        document.get("_plain_markdown") or "", 500
+                    ),
+                },
+                hypothesis_id="H2",
+            )
+        except ImportError:
+            pass
+        # #endregion
         return document
 
     def process(
@@ -367,7 +501,7 @@ class OCRProcessor:
 
         dpi = pdf_dpi if pdf_dpi is not None else (150 if self.fast_mode else 200)
         source = Path(input_path)
-        document = self._run_pipeline(source, dpi=dpi, max_pages=max_pages)
+        document = self._run_pipeline(source, dpi=dpi, max_pages=max_pages, enable_pdf_routing=self.enable_pdf_routing)
 
         if self._is_pdf(input_path):
             result = _document_ir_to_pdf_result(document, input_path)
@@ -481,7 +615,7 @@ def create_processor(
     model_root: Optional[str] = None,
     use_gpu: bool = False,
     use_table_recognition: bool = True,
-    fast_mode: bool = True,
+    fast_mode: bool = False,
     **kwargs: Any,
 ) -> OCRProcessor:
     return OCRProcessor(

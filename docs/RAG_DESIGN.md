@@ -41,7 +41,7 @@ flowchart TD
 ## 主要组件与职责
 
 - Data Ingestor：负责从文件系统、API、数据库拉取数据，调用 OCR（可选），并输出标准化文档记录。
-- Preprocessor：文本切分（`utils/text_chunker.py`）、表格解析、实体抽取（用于 KG 对齐）。
+- Preprocessor：文本切分（`document/rag/shared/text_chunker.py`）、七步分块（`application/chunking/`）、表格解析。
 - Embedder：统一调用 `config/llm.yml` 中的 `embedding_model_name` 生成向量。
 - Vector Store：Chroma/Weaviate/Milvus 提供向量索引与相似度检索。
 - Inverted Index：BM25 倒排（可用 ElasticSearch 或 Whoosh）用于混合检索。

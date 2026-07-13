@@ -57,6 +57,7 @@ class RetrievalRouter:
         enable_rerank: bool = True,
         default_top_k: int = 10,
         default_rerank_n: int = 5,
+        embedding_cfg: Optional[Any] = None,
     ):
         self._classifier = classifier or QueryClassifier()
         self._rules = rules or RoutingRules(
@@ -78,6 +79,7 @@ class RetrievalRouter:
         self._cache_ttl = cache_ttl
         self._default_top_k = default_top_k
         self._default_rerank_n = default_rerank_n
+        self._embedding_cfg = embedding_cfg
         self._logger = logging.getLogger("rag.router")
     
     async def route_and_retrieve(
@@ -484,15 +486,11 @@ class RetrievalRouter:
     async def _get_embedding(self, text: str) -> List[float]:
         if self._embedding_model is None:
             raise RuntimeError("Embedding model not configured")
-        
-        if hasattr(self._embedding_model, 'aembed'):
-            embeddings = await self._embedding_model.aembed([text])
-            return embeddings[0]
-        elif hasattr(self._embedding_model, 'embed'):
-            embeddings = self._embedding_model.embed([text])
-            return embeddings[0]
-        else:
-            raise RuntimeError("Embedding model has no embed method")
+        from document.rag.config.embedding import EmbeddingConfig
+        from document.rag.pipelines.retrieval_pipeline import get_embedding
+
+        cfg = self._embedding_cfg or EmbeddingConfig()
+        return await get_embedding(text, self._embedding_model, embedding_cfg=cfg)
     
     def _get_cache_key(self, queries: Any, tenant_id: str) -> str:
         if isinstance(queries, list):

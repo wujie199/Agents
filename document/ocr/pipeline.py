@@ -23,6 +23,7 @@ from document.ocr.qc import (
     needs_full_page_rerun,
     qc_rank,
 )
+from document.rag.shared.debug_trace import summarize_ocr_regions, trace_pipeline_step
 
 
 class UniversalOcrPipeline:
@@ -113,6 +114,34 @@ class UniversalOcrPipeline:
             )
             work_image = pre_result.image_path
             ocr_scratch = pre_scratch / "ocr"
+            # #region agent log
+            trace_pipeline_step(
+                "ocr",
+                f"page_{page_index:04d}_attempt_{attempt}_preprocess",
+                f"第 {page_index + 1} 页预处理 attempt {attempt + 1}",
+                data={
+                    "page_index": page_index,
+                    "attempt": attempt,
+                    "orientation_applied": pre_result.orientation_applied,
+                    "unwarp_applied": pre_result.unwarp_applied,
+                    "skipped": pre_result.skipped,
+                    "work_image": str(work_image),
+                },
+                artifact={
+                    "plan": {
+                        "use_orientation": plan.use_orientation,
+                        "use_unwarp": plan.use_unwarp,
+                    },
+                    "preprocess": {
+                        "orientation_angle": pre_result.orientation_angle,
+                        "orientation_applied": pre_result.orientation_applied,
+                        "unwarp_applied": pre_result.unwarp_applied,
+                        "skipped": pre_result.skipped,
+                    },
+                },
+                hypothesis_id="H2",
+            )
+            # #endregion
 
             attempt_cfg = cfg
             if prev_qc is not None and prev_qc.suggest_table_e2e:
@@ -181,6 +210,29 @@ class UniversalOcrPipeline:
             )
             page["qc"] = qc.to_dict()
             rank = qc_rank(qc)
+            # #region agent log
+            trace_pipeline_step(
+                "ocr",
+                f"page_{page_index:04d}_attempt_{attempt}_ocr_qc",
+                f"第 {page_index + 1} 页 OCR+QC attempt {attempt + 1}",
+                data={
+                    "page_index": page_index,
+                    "attempt": attempt,
+                    "use_region_retry": use_region_retry,
+                    "qc_status": qc.status,
+                    "issue_count": qc.issue_count,
+                    "regions": len(page.get("regions") or []),
+                },
+                artifact={
+                    "page_index": page_index,
+                    "attempt": attempt,
+                    "preprocess": page.get("preprocess"),
+                    "qc": qc.to_dict(),
+                    "regions": summarize_ocr_regions(page.get("regions") or []),
+                },
+                hypothesis_id="H2",
+            )
+            # #endregion
 
             if best_page is None or rank < best_rank or rank == best_rank:  # type: ignore[operator]
                 best_page = page
@@ -217,7 +269,22 @@ class UniversalOcrPipeline:
             final_status = "fail"
         if final_status != "pass":
             print(f"  第 {page_index + 1} 页 QC 最终状态: {final_status}")
-        return normalize_page(best_page)
+        final_page = normalize_page(best_page)
+        # #region agent log
+        trace_pipeline_step(
+            "ocr",
+            f"page_{page_index:04d}_final",
+            f"第 {page_index + 1} 页 OCR 最终结果",
+            data={
+                "page_index": page_index,
+                "final_qc_status": final_status,
+                "regions": len(final_page.get("regions") or []),
+            },
+            artifact=final_page,
+            hypothesis_id="H2",
+        )
+        # #endregion
+        return final_page
 
     def process_all_pages(
         self,
@@ -241,9 +308,34 @@ class UniversalOcrPipeline:
                 )
             )
 
-        return build_document_ir(
+        document = build_document_ir(
             source=source,
             pages=pages,
             pipeline_version=self.cfg.pipeline_version,
             config_summary=self.cfg.summary(),
         )
+        # #region agent log
+        trace_pipeline_step(
+            "ocr",
+            "all_pages_document_ir",
+            "全页 OCR document_ir 完成",
+            data={
+                "source": str(source),
+                "pages": len(pages),
+                "regions_total": sum(len(p.get("regions") or []) for p in pages),
+            },
+            artifact={
+                "config_summary": self.cfg.summary(),
+                "page_summaries": [
+                    {
+                        "page_index": p.get("page_index"),
+                        "qc_status": (p.get("qc") or {}).get("status"),
+                        "region_count": len(p.get("regions") or []),
+                    }
+                    for p in pages
+                ],
+            },
+            hypothesis_id="H2",
+        )
+        # #endregion
+        return document

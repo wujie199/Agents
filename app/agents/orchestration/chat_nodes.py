@@ -261,6 +261,11 @@ async def _build_turn_messages_body(
     )
     if isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra["retrieval_intent"] = retrieval_plan.intent
+        ctx.extra["retrieval_plan_audit"] = retrieval_plan.to_audit_dict()
+
+    from app.agents.memory.memory_graph_state import sync_pending_deltas_from_hot
+
+    sync_pending_deltas_from_hot(ctx)
 
     pending_remember = await auto_remember_name_intro(
         ctx,
@@ -629,6 +634,10 @@ async def _build_turn_messages_body(
                 retrieval_plan.intent, cfg
             ),
             "pending_remember": (ctx.extra or {}).get("pending_remember"),
+            "recall_strategy": retrieval_plan.recall_strategy,
+            "recall_scope": retrieval_plan.recall_scope,
+            "intent_source": retrieval_plan.intent_source,
+            "rules_version": retrieval_plan.rules_version,
         },
     )
     evidences_summary = [
@@ -643,9 +652,20 @@ async def _build_turn_messages_body(
     # ── 记忆命中摘要（供前端展示） ──
     _skill_markers = ("【可用技能】", "【技能检索】")
     _l4_markers = ("【外部画像 L4】", "【用户画像】")
+    _recall_prefetch = session_ctx.recall_prefetch or ""
+    _recall_strategy = retrieval_plan.recall_strategy or "none"
+    _preview_limit = (
+        cfg.session_search_prefetch_max_chars
+        if _recall_strategy in ("meta_recent", "browse")
+        else 200
+    )
     memory_summary = {
         "recall_hit": session_ctx.recall_prefetch_hit,
-        "recall_preview": (session_ctx.recall_prefetch or "")[:200],
+        "recall_preview": _recall_prefetch[:_preview_limit],
+        "recall_strategy": _recall_strategy,
+        "recall_scope": retrieval_plan.recall_scope or "session",
+        "intent_source": retrieval_plan.intent_source,
+        "rules_version": retrieval_plan.rules_version,
         "skill_hit": any(m in (session_context or "") for m in _skill_markers),
         "skill_preview": "",
         "l4_hit": any(m in (session_context or "") for m in _l4_markers),
@@ -735,11 +755,18 @@ async def persist_user_and_assistant(
             ctx.extra["_turn_persisted_id"] = turn_id
 
     from app.agents.memory.l1_nudge import maybe_nudge_memory_review
+    from app.agents.orchestration.chat_config import load_chat_config
 
-    interval = getattr(memory, "l1_nudge_interval", 0)
-    if interval:
+    cfg = chat_cfg or load_chat_config()
+    interval_raw = getattr(memory, "l1_nudge_interval", 0)
+    try:
+        interval = int(interval_raw or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    if interval > 0:
         await maybe_nudge_memory_review(
             ctx,
             nudge_interval=interval,
             summarizer=getattr(memory, "_summarizer", None),
+            chat_cfg=cfg,
         )

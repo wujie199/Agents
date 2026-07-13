@@ -1,5 +1,8 @@
 """FAQ 专用切块测试。"""
 
+import json
+from pathlib import Path
+
 from document.rag.application.indexing.faq_chunker import (
     FaqChunker,
     extract_trailing_section,
@@ -89,3 +92,31 @@ def test_sanitize_faq_content_removes_dash_question_mark():
     item = format_faq_block("4 APP无法连接机器人怎么办 -确认手机和机器人连接同一WiFi")
     assert "-？" not in item.content
     assert sanitize_faq_content("1. 问题\n-？\n答案") == "1. 问题\n答案"
+
+
+OCR_MARKDOWN_SAMPLE = (
+    "=== 第 1 页 === #扫地机器人100问 ##一、基础与技术类 "
+    "1.**扫地机器人是如何实现自主导航的?** -通过激光雷达(LDS)实现定位。"
+    "2.**LDS激光导航和VSLAM视觉导航哪个更好?** -LDS精度更高。"
+    "12.**最大越障高度是多少?** -多数机型1.5-2cm。"
+)
+
+
+def test_split_ocr_markdown_faq_items():
+    items = split_faq_items(OCR_MARKDOWN_SAMPLE)
+    assert len(items) >= 3
+    nums = {i.faq_number for i in items}
+    assert "1" in nums and "2" in nums and "12" in nums
+    q2 = next(i for i in items if i.faq_number == "2")
+    assert "LDS" in q2.content
+    assert "1.5-2cm" in next(i for i in items if i.faq_number == "12").content
+
+
+def test_split_robot_100wen_document_when_artifact_present():
+    artifact = Path("data/rag_offline/pipeline_trace/doc_6d726f4604d9e7eb/chunking_run_start.json")
+    if not artifact.exists():
+        return
+    content = json.loads(artifact.read_text())["payload"]["content"]
+    items = split_faq_items(content)
+    assert len(items) >= 70
+    assert all(i.faq_number for i in items)

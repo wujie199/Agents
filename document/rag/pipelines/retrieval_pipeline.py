@@ -23,7 +23,9 @@ from core.ports.rag.embedding import EmbeddingPort
 from core.ports.storage.cache import CachePort
 from core.ports.storage.vector import VectorPort
 
+from document.rag.config.embedding import EmbeddingConfig
 from document.rag.config.pipeline import RagPipelineConfig
+from document.rag.application.embedding.encoder import EmbeddingEncoder
 from document.rag.application.retrieval.plan_codec import business_plan_to_router_override
 from document.rag.application.retrieval.rerank_utils import apply_rerank
 from document.rag.shared.evidence_helpers import bundle_from_cache_dict, bundle_to_cache_dict
@@ -136,22 +138,24 @@ async def cache_invalidate_pattern(cache_port: Optional[CachePort], pattern: str
         await result
 
 
-async def get_embedding(text: str, embedding_model: EmbeddingPort) -> List[float]:
-    if hasattr(embedding_model, "aembed"):
-        embeddings = await embedding_model.aembed([text])
-        return embeddings[0]
-    if hasattr(embedding_model, "embed"):
-        embeddings = embedding_model.embed([text])
-        return embeddings[0]
-    raise RuntimeError("Embedding model has no embed method")
+async def get_embedding(
+    text: str,
+    embedding_model: EmbeddingPort,
+    embedding_cfg: Optional[EmbeddingConfig] = None,
+) -> List[float]:
+    cfg = embedding_cfg or EmbeddingConfig()
+    encoder = EmbeddingEncoder(embedding_model, cfg)
+    return await encoder.encode_query(text)
 
 
-async def get_embeddings(texts: List[str], embedding_model: EmbeddingPort) -> List[List[float]]:
-    if hasattr(embedding_model, "aembed"):
-        return await embedding_model.aembed(texts)
-    if hasattr(embedding_model, "embed"):
-        return embedding_model.embed(texts)
-    raise RuntimeError("Embedding model has no embed method")
+async def get_embeddings(
+    texts: List[str],
+    embedding_model: EmbeddingPort,
+    embedding_cfg: Optional[EmbeddingConfig] = None,
+) -> List[List[float]]:
+    cfg = embedding_cfg or EmbeddingConfig()
+    encoder = EmbeddingEncoder(embedding_model, cfg)
+    return await encoder.encode_queries(texts)
 
 
 def check_acl(metadata: Dict, acl: Any) -> bool:
@@ -176,10 +180,13 @@ async def vector_retrieve(
     rerank_top_n: int,
     rerank_model: Optional[RerankPort],
     logger: logging.Logger,
+    embedding_cfg: Optional[EmbeddingConfig] = None,
 ) -> EvidenceBundle:
     """纯向量检索 + 重排。"""
     try:
-        query_vector = await get_embedding(query, embedding_model)
+        query_vector = await get_embedding(
+            query, embedding_model, embedding_cfg=embedding_cfg
+        )
         search_results = await asyncio.to_thread(
             vector_port.similarity_search,
             collection,

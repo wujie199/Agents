@@ -1,78 +1,9 @@
-# Memory 统一配置（对话侧记忆编排见 config/chat.yml；模型见 config/models.yml）
-#
-# 可选覆盖：
-#   MEMORY_PROFILE=vector|cold|skills|l4_http   # 开发联调（见 profiles 段）
-#   MEMORY_CONFIG=config/memory.production.example.yml
-
+# Memory — 默认值见 config_loader.DEFAULT_MEMORY_CONFIG；L0 压缩唯一配置源
 l1:
-  hot_memory_max_chars: 2200
-  user_memory_max_chars: 1375
   store_dir: data/memory_dev
-  l1_use_file_lock: true
-  l1_store_backend: file
-  l1_hermes_entries: true
-  l1_write_approval: false
-  l1_nudge_interval: 10
-  turn_buffer_flush_size: 10
-
-l2:
-  session_search_max_chars: 2000
-  session_search_cache_ttl: 900
-  session_search_negative_cache_ttl: 120
-  retention_days: 90
-  checkpoint_retention_days: 90
-  memory_summarizer_role: memory_summarizer_llm
-  use_llm_compress: true
-  use_llm_summarize: true
-  reindex_batch_size: 200
-  l2_compression_continuation: split   # split | inplace
-
-archive:
-  archive_backend: sqlite
-  archive_sqlite_path: data/session_archive.db
-  archive_sqlite_pool_size: 5
-  pg_host: localhost
-  pg_port: 5432
-  pg_database: agents
-  pg_user: postgres
-  pg_password: ""
-  pg_pool_size: 10
-
-vector:
-  enable_session_vector_index: true
-  session_vector_dir: data/session_vectors
-  session_vector_collection: session_messages
-  session_hybrid_search: true
-  session_vector_embed_batch_size: 32
-  session_vector_auto_reindex_on_version_change: true
-
-skills:
-  skills_dir: skills/published
-  skills_drafts_dir: skills/drafts
-  skills_meta_dir: skills/meta
-  skill_auto_extract_draft: true
-  skill_deprecate_threshold: 0.2
-  skill_include_deprecated_in_search: false
-  skill_auto_extract_min_steps: 2
 
 l4:
   provider: none
-  enabled_toolsets: []
-  prefetch_timeout_ms: 1500
-  l4_prefetch_max_chars: 2000
-  circuit_breaker:
-    failure_threshold: 5
-    reset_timeout_s: 120
-  external_profiles_dir: data/external_profiles
-  external_profiles_backend: file
-  external_profiles_http_url: null
-  external_profiles_http_timeout: 10
-  external_profiles_http_api_key: null
-  external_profile_cache_ttl: 300
-  external_profile_cache_backend: redis
-  external_merge_on_finalize: true
-  purge_delete_external_audit: true
-  purge_tenant_l4_strip_user_keys: true
 
 l0:
   l0_context_compress_enabled: true
@@ -82,17 +13,6 @@ l0:
   l0_anti_jitter_pct: 0.10
   l0_tool_prune_min_chars: 200
 
-cold_archive:
-  enable_cold_archive: true
-  cold_archive_prefix: l2/cold
-  cold_archive_compress: true
-  cold_archive_search_scan_limit: 100
-  cold_archive_keep_vectors: true
-  cold_archive_encrypt_at_rest: false
-  session_search_cold_fallback: true
-  session_search_rerank: true
-
-# 开发联调：export MEMORY_PROFILE=vector（无需单独 yml 文件）
 profiles:
   vector:
     enable_cold_archive: false

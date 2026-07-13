@@ -18,6 +18,7 @@ scenarios:
     query: "之前我们聊过什么"
     expect_intent: recall
     expect_session_search: true
+    expect_recall_strategy: meta_recent
     expect_rag_default: false
 
   - id: knowledge_rag
@@ -40,6 +41,7 @@ scenarios:
     query: "别的会话里说过什么"
     expect_intent: recall
     expect_scope: user
+    expect_recall_strategy: browse
 
   - id: remember_explicit
     query: "记住我喜欢 JSON 输出"

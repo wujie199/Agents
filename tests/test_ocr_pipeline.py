@@ -13,7 +13,7 @@ from document.ocr.processor import (
     _region_ir_to_layout,
 )
 from document.rag.config import IngestConfig, RagPipelineConfig
-from document.rag.adapters.registry import build_ingest
+from document.rag.components.ingest.registry import build_ingest
 from document.rag.components.ingest.ocr_processor import OcrProcessorIngestAdapter
 
 

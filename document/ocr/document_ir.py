@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from document.ocr.labels import ASSET_LABELS, FORMULA_LABELS, TABLE_LABEL
+from document.ocr.labels import ASSET_LABELS, DROP_LABELS, FORMULA_LABELS, TABLE_LABEL
 
 
 def _region_content(region: dict[str, Any]) -> dict[str, Any]:
@@ -103,9 +103,11 @@ def build_document_ir(
 
 
 def region_to_markdown(region: dict[str, Any]) -> str:
+    label = region.get("label", "")
+    if label in DROP_LABELS:
+        return ""
     content = region.get("content") or _region_content(region)
     ctype = content.get("type")
-    label = region.get("label", "")
 
     if ctype == "table":
         html = content.get("html") or ""

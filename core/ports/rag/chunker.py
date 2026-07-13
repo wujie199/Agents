@@ -10,6 +10,7 @@ class ChunkStrategy(str, Enum):
     FIXED = "fixed"
     FAQ = "faq"
     ARTICLE = "article"
+    SEVEN_STEP = "seven_step"
 
 
 @dataclass

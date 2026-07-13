@@ -177,6 +177,9 @@ async def end_agent_session(
         },
     )
     cfg = chat_cfg or load_chat_config()
+    from app.agents.memory.memory_graph_state import flush_graph_pending_deltas_on_finalize
+
+    graph_pending = await flush_graph_pending_deltas_on_finalize(ctx)
     l1_extract_pending = await enrich_l1_before_finalize(ctx, cfg)
     from app.agents.memory.memory_runtime_debug import (
         is_memory_runtime_debug,
@@ -197,6 +200,7 @@ async def end_agent_session(
     if not isinstance(summary, dict):
         summary = {}
     summary["l1_extract_pending"] = l1_extract_pending
+    summary["graph_pending_flushed"] = graph_pending
     if isinstance(getattr(ctx, "extra", None), dict):
         ctx.extra["finalize_summary"] = summary
     agent_debug(

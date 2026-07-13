@@ -122,6 +122,11 @@ class ChromaVectorAdapter:
         col = self._get_collection(collection)
         col.delete(ids=ids)
         return len(ids)
+
+    def list_ids_by_filter(self, collection: str, filter: dict) -> List[str]:
+        col = self._get_collection(collection)
+        results = col.get(where=_normalize_where(filter))
+        return list(results.get("ids") or [])
     
     def get_index_version(self, collection: str) -> str:
         col = self._get_collection(collection)

@@ -88,14 +88,12 @@ class TestIngestFactoryOcrOnly:
         pipeline = build_ingest_pipeline(cfg)
         assert isinstance(pipeline, OcrProcessorIngestAdapter)
 
-    def test_build_structured_pipeline(self):
+    def test_structured_mode_falls_back_to_ocr_only(self):
         cfg = RagPipelineConfig(
             ingest=PipelineIngestConfig(mode="structured"),
         )
         pipeline = build_ingest_pipeline(cfg)
-        from document.rag.application.ingest_factory import RoutedIngestAdapter
-
-        assert isinstance(pipeline, RoutedIngestAdapter)
+        assert isinstance(pipeline, OcrProcessorIngestAdapter)
 
     def test_plain_text_in_ocr_only_mode(self, tmp_path):
         cfg = RagPipelineConfig(ingest=PipelineIngestConfig(mode="ocr_only"))

@@ -26,6 +26,10 @@ from document.rag.application.retrieval.rewrite.retrieval_quality import (
 from document.rag.application.retrieval.rewrite.rewrite_profile import (
     resolve_rewrite_profile,
 )
+from document.rag.application.embedding.collection import effective_collection_name
+from document.rag.application.chunking.parent_resolver import (
+    expand_evidences_with_parent_context,
+)
 from document.rag.application.retrieval.rerank_utils import apply_rerank
 from document.rag.application.retrieval.router.fusion import FusionFactory
 from document.rag.application.retrieval.tag_filter import metadata_matches_tags
@@ -281,6 +285,7 @@ async def _hybrid_search_once(
     embedding_model: Any,
     bm25_index: Any,
     config: RagPipelineConfig,
+    collection: str,
     tenant_id: str,
     acl: Any,
     vector_k: int,
@@ -301,7 +306,7 @@ async def _hybrid_search_once(
                 await vector_search(
                     vector_port,
                     embedding_model,
-                    config.collection_name,
+                    collection,
                     query,
                     vector_k,
                     tenant_id,
@@ -385,9 +390,12 @@ async def hybrid_retrieve(
     tags: Optional[List[str]] = None,
     tag_match: str = "any",
     query_rewriter: Optional[QueryRewritePort] = None,
+    parent_store: Optional[Any] = None,
+    expand_parents: bool = True,
 ) -> EvidenceBundle:
     """向量 + BM25 加权融合，再 rerank；支持规则改写多 query 与维护 metadata 软路由。"""
     ret = config.retrieval
+    collection = effective_collection_name(config)
     vector_k = ret.vector_top_k or top_k or config.default_top_k
     bm25_k = ret.bm25_top_k or config.default_top_k
     fusion_n = ret.fusion_top_n or max(vector_k, bm25_k)
@@ -419,6 +427,7 @@ async def hybrid_retrieve(
         embedding_model=embedding_model,
         bm25_index=bm25_index,
         config=config,
+        collection=collection,
         tenant_id=tenant_id,
         acl=acl,
         vector_k=vector_k,
@@ -507,6 +516,17 @@ async def hybrid_retrieve(
             "no_hits",
         )
 
+    if (
+        expand_parents
+        and parent_store is not None
+        and config.chunk_pipeline.enable_parent_child
+    ):
+        fused = expand_evidences_with_parent_context(
+            fused,
+            collection,
+            parent_store=parent_store,
+        )
+
     return EvidenceBundle(
         evidences=fused,
         plan={
@@ -515,7 +535,7 @@ async def hybrid_retrieve(
             "bm25_k": bm25_k,
             "fusion_strategy": ret.fusion_strategy,
             "hybrid_weights": ret.hybrid_weights,
-            "collection": config.collection_name,
+            "collection": collection,
             "tags": tags or intent_tags or [],
             "tag_match": tag_match if tags else (intent_match if intent_tags else None),
             "rerank_min_score": min_score if rerank_applied else None,

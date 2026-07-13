@@ -50,12 +50,16 @@ _DEFAULT = DeepAgentConfig()
 def load_deep_agent_config(
     config_dir: str | Path = "config",
 ) -> DeepAgentConfig:
-    """从 config/chat.yml 的 deep_agent 段读取配置。"""
-    path = Path(config_dir) / "chat.yml"
+    """从 chat.yml（或 CHAT_CONFIG）的 deep_agent 段读取配置。"""
+    from app.agents.orchestration.chat_config import (
+        load_chat_yaml_document,
+        resolve_chat_config_path,
+    )
+
+    path = resolve_chat_config_path(config_dir)
     if not path.is_file():
         return _DEFAULT
-    with path.open(encoding="utf-8") as f:
-        raw: dict[str, Any] = yaml.safe_load(f) or {}
+    raw = load_chat_yaml_document(path, config_dir=config_dir)
     da = raw.get("deep_agent") or {}
     if not isinstance(da, dict):
         return _DEFAULT

@@ -73,6 +73,7 @@ from app.agents.orchestration.chat_service import (
 )
 from app.agents.orchestration.chat_langgraph import create_chat_langgraph_session_async
 from app.agents.roles.react_loop import end_agent_session
+from app.web.memory_commands import try_handle_memory_slash_command
 from app.web.observability_panel import (
     begin_turn_observability,
     collect_turn_observability,
@@ -171,6 +172,20 @@ def _format_rag_markdown(evidences: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_recall_preview_lines(preview: str, strategy: str) -> list[str]:
+    """格式化会话回忆预览（meta 策略按行倒序展示）。"""
+    text = (preview or "").strip()
+    if not text:
+        return []
+    lines = text.splitlines()
+    if lines and lines[0].startswith("【") and lines[0].endswith("】"):
+        lines = lines[1:]
+    body_lines = [ln.strip() for ln in lines if ln.strip()]
+    if strategy in ("meta_recent", "browse"):
+        return body_lines
+    return body_lines[:3]
+
+
 def _format_memory_markdown(memory_summary: dict) -> str:
     """将记忆组件命中摘要格式化为 Markdown。"""
     if not memory_summary:
@@ -178,12 +193,15 @@ def _format_memory_markdown(memory_summary: dict) -> str:
     recall_hit = memory_summary.get("recall_hit")
     skill_hit = memory_summary.get("skill_hit")
     l4_hit = memory_summary.get("l4_hit")
+    recall_strategy = str(memory_summary.get("recall_strategy") or "")
     lines = ["#### 🧠 记忆组件\n"]
     if recall_hit:
         lines.append("- ✅ 会话回忆")
+        if recall_strategy in ("meta_recent", "browse"):
+            lines.append(f"  - 策略: `{recall_strategy}` · 按时间倒序")
         preview = memory_summary.get("recall_preview", "")
-        if preview:
-            lines.append(f"  > {preview[:200]}")
+        for row in _format_recall_preview_lines(preview, recall_strategy):
+            lines.append(f"  - `{row}`")
     else:
         lines.append("- ⬜ 会话回忆")
     if skill_hit:
@@ -200,6 +218,45 @@ def _format_memory_markdown(memory_summary: dict) -> str:
             lines.append(f"  > {preview[:200]}")
     else:
         lines.append("- ⬜ 用户画像")
+
+    # GraphState / Hermes 工作记忆（merge_memory_summary_with_state 并入）
+    hermes_bits: list[str] = []
+    intent = memory_summary.get("retrieval_intent")
+    if intent:
+        hermes_bits.append(f"- **检索意图**: `{intent}`")
+    if recall_strategy and recall_strategy != "none":
+        hermes_bits.append(f"- **回忆策略**: `{recall_strategy}`")
+    recall_scope = memory_summary.get("recall_scope")
+    if recall_scope and recall_strategy in ("meta_recent", "browse", "semantic"):
+        hermes_bits.append(f"- **回忆范围**: `{recall_scope}`")
+    path = memory_summary.get("memory_path")
+    if path:
+        path_label = "Path B（记忆工具）" if path == "path_b" else "Path A（无工具）"
+        hermes_bits.append(f"- **记忆路径**: `{path}` · {path_label}")
+    if "l0_applied" in memory_summary:
+        hermes_bits.append(
+            "- **L0 压缩**: "
+            + ("✅ 已触发" if memory_summary.get("l0_applied") else "⬜ 未触发")
+        )
+    pending = memory_summary.get("pending_remember")
+    if pending:
+        hermes_bits.append(f"- **待写入 L1**: {str(pending)[:200]}")
+    deltas = memory_summary.get("pending_memory_delta")
+    if isinstance(deltas, list) and deltas:
+        hermes_bits.append(f"- **pending delta 数**: {len(deltas)}")
+        for d in deltas[:3]:
+            if isinstance(d, dict):
+                hermes_bits.append(
+                    f"  - `{d.get('key')}` = {str(d.get('value', ''))[:80]}"
+                    + (" (HITL)" if d.get("require_hitl") else "")
+                )
+    hermes_mode = memory_summary.get("session_search_default_hermes_mode")
+    if hermes_mode:
+        hermes_bits.append(f"- **session_search 默认模式**: `{hermes_mode}`")
+    if hermes_bits:
+        lines.append("\n#### 🔗 Hermes 工作记忆\n")
+        lines.extend(hermes_bits)
+
     lines.append("")
     return "\n".join(lines)
 
@@ -446,6 +503,11 @@ async def chat_stream(
     req = handle.run_ctx.request
     if req is not None and not getattr(req, "trace_id", None):
         req.trace_id = f"web-{session_id}"
+
+    slash_reply = await try_handle_memory_slash_command(handle.run_ctx, message)
+    if slash_reply is not None:
+        yield slash_reply, ""
+        return
 
     # 会话就绪，通知前端
     yield json.dumps({"type": "status", "text": "🔍 会话就绪，检索知识库..."}, ensure_ascii=False), ""
@@ -845,7 +907,7 @@ def build_ui() -> gr.Blocks:
                 )
                 chat_input = gr.Textbox(
                     label="输入消息",
-                    placeholder="输入消息后按 Enter 发送...",
+                    placeholder="输入消息后按 Enter 发送；/pending 查看待确认记忆，/confirm 确认写入 L1",
                     lines=3,
                     show_label=False,
                 )

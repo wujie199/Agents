@@ -95,21 +95,40 @@ def merge_metadata_from_base(
     return merged
 
 
+def deep_merge_rag_config(
+    base: dict[str, Any],
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    """rag.yml 基座 + profile 增量：嵌套 dict 递归合并，标量/列表以 overlay 为准。"""
+    result = dict(base)
+    for key, overlay_val in overlay.items():
+        base_val = result.get(key)
+        if (
+            isinstance(overlay_val, dict)
+            and isinstance(base_val, dict)
+        ):
+            result[key] = deep_merge_rag_config(base_val, overlay_val)
+        else:
+            result[key] = overlay_val
+    return result
+
+
+def _is_rag_base_document(path: Path) -> bool:
+    return path.name in ("rag.yml", "rag_pipeline.yml")
+
+
 def load_rag_yaml_document(
     config_path: str | Path,
     *,
     config_dir: str = "config",
 ) -> dict[str, Any]:
-    """加载指定 RAG 配置文档，并在 profile 文件上合并 base metadata。"""
+    """加载 RAG 配置：profile/示例外层文件与 config/rag.yml 深合并。"""
     path = Path(config_path)
     raw = _read_yaml(path)
     base_raw = load_rag_base_yaml(config_dir)
-    if path.name not in ("rag.yml", "rag_pipeline.yml") and base_raw:
-        raw["metadata"] = merge_metadata_from_base(
-            dict(raw.get("metadata") or {}),
-            base_raw,
-        )
-    return raw
+    if _is_rag_base_document(path) or not base_raw:
+        return raw
+    return deep_merge_rag_config(base_raw, raw)
 
 
 def load_rag_eval_section(config_dir: str | Path = "config") -> dict[str, Any]:

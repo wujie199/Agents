@@ -2,31 +2,33 @@
 
 ## 范围
 
-- **在范围内**：向量 RAG、三库检索（vector / SQL / graph）、改写（HyDE / Multi-Query）、Rerank、`IndexService`、`RetrievalRouter`
-- **配置开关**：`config/rag_pipeline.yml` 中 `retrieval.enable_*` 与 `rewrite.enable_*`
+- **在范围内**：向量 RAG、混合检索（vector + BM25）、可选三库（vector / SQL / graph）、改写、Rerank、`IndexService`
+- **配置开关**：`config/rag.yml`（+ profile 增量）中 `retrieval.enable_*` 与 `rewrite.enable_*`
 
 ## 主路径
 
 ```text
-文件 → IngestFactory → IndexService → Chroma (collection: agent)
-查询 → RAGPortAdapter → RetrievalRouter（改写 → 三库 → 融合 → rerank）→ EvidenceBundle
-写入 → IndexService → Chroma + documents 表（SQL）+ 图节点（Graph，需 enable_graph_index）
+文件 → IngestFactory (ocr_only) → IndexService (seven_step) → Chroma + BM25
+查询 → RAGPortAdapter → hybrid_retrieve 或 RetrievalRouter → EvidenceBundle
+写入 → IndexService → Chroma（+ 可选 SQL/Graph sidecar，需 enable_graph_index）
 ```
 
 ## 配置
 
-- 统一配置：`config/rag_pipeline.yml`
-- 加载器：`document/rag/config.py` → `load_rag_pipeline_config()`
-- Collection 名称默认 **`agent`**（与 `config/chroma.yml` 对齐）
+- 基座：`config/rag.yml`；profile：`config/rag.faq.yml`、`config/rag.contract.yml`
+- 加载：`document/rag/config/` → `load_rag_pipeline_config()`
+- 环境变量：`RAG_CONFIG`（兼容旧名 `RAG_PIPELINE_CONFIG`）
+- Collection 默认 **`agent`**（`embedding.versioned_collection` 可后缀模型 slug）
 
 ## 模块
 
 | 模块 | 路径 |
 |------|------|
-| 索引 | `document/rag/pipeline/index/service.py` |
-| 检索 | `document/rag/bridges/rag_port_adapter.py` |
-| 摄取路由 | `document/rag/pipeline/ingest/factory.py` |
-| 开发缓存 | `agent_platform/storage/adapters/memory/async_cache_adapter.py` |
+| 离线建库 | `document/build_rag_index.py` |
+| 索引 | `document/rag/application/indexing/service.py` |
+| 检索门面 | `document/rag/facades/rag.py` |
+| 混合检索 | `document/rag/application/retrieval/hybrid_pipeline.py` |
+| 摄取 | `document/rag/components/ingest/registry.py` |
 | E2E | `scripts/rag_e2e.py` |
 
 ## 使用
@@ -34,29 +36,27 @@
 ```python
 ctx = build_development_context(request)
 
-# 推荐：建库门面（文件 → 摄取 → 索引）
 from core.ports.index import IndexProfile
 result = await ctx.require_knowledge_base().ingest_and_index(
     file_path, doc_id, tenant_id, index_profile=IndexProfile.VECTOR_ONLY,
 )
 
-# 或仅索引已有文本
-await ctx.require_index().index_document(doc_id, content, tenant_id)
-
 bundle = await ctx.rag.route_and_retrieve(query, request)
 ```
 
 ```bash
+python document/build_rag_index.py --profile faq data/test_docs/*.pdf
+python document/query_rag.py "你的问题"
 python scripts/rag_e2e.py path/to/doc.txt --query "你的问题"
 ```
 
-## 多后端检索（业务怎么查）
+## 多后端检索
 
-见 **[RAG_BUSINESS_QUERY.md](./RAG_BUSINESS_QUERY.md)**：业务只调 `ctx.rag.route_and_retrieve(query, request, plan?)`；`plan` 由 Router Agent 下发或留空自动分类。
+见 **[RAG_BUSINESS_QUERY.md](./RAG_BUSINESS_QUERY.md)**。
 
-- `retrieval.enable_router: true` 时 `RAGPortAdapter` 委托 `RetrievalRouter`
-- `enable_graph` / `enable_sql` 控制是否启用图/SQL（需组合根注入对应 Port）
+- `retrieval.enable_router: true` → `RetrievalRouter`（生产 example）
+- `enable_router: false` + `enable_hybrid: true` → hybrid（faq/contract 默认）
 
 ## Graph 二期
 
-保留 `RetrievalRouter` / `GraphPort` 代码，组合根不注入图写入；`enable_graph_index: false`。
+保留 `RetrievalRouter` / `GraphPort` 代码；基座与 profile 默认 `enable_graph_index: false`。

@@ -31,36 +31,49 @@ class PolicyPortAdapter:
         if config_path:
             self._load_config(config_path)
     
+    @staticmethod
+    def _policy_from_dict(
+        data: dict[str, Any],
+        fallback: PolicyConfig | None = None,
+    ) -> PolicyConfig:
+        base = fallback or PolicyConfig()
+        return PolicyConfig(
+            max_parallel_sends=data.get("max_parallel_sends", base.max_parallel_sends),
+            max_intra_batch_workers=data.get(
+                "max_intra_batch_workers", base.max_intra_batch_workers
+            ),
+            default_batch_size=data.get("default_batch_size", base.default_batch_size),
+            min_batch_size=data.get("min_batch_size", base.min_batch_size),
+            max_batch_size=data.get("max_batch_size", base.max_batch_size),
+            max_rag_batch_queries=data.get(
+                "max_rag_batch_queries", base.max_rag_batch_queries
+            ),
+            max_embed_batch_size=data.get(
+                "max_embed_batch_size", base.max_embed_batch_size
+            ),
+            max_qps_per_tenant=data.get("max_qps_per_tenant", base.max_qps_per_tenant),
+            token_budget_per_user=data.get(
+                "token_budget_per_user", base.token_budget_per_user
+            ),
+        )
+
     def _load_config(self, config_path: str) -> None:
         path = Path(config_path)
         if not path.exists():
             return
-        
+
         with open(path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
-        
+
         if "default" in config:
-            self._default_config = PolicyConfig(
-                max_parallel_sends=config["default"].get("max_parallel_sends", 5),
-                max_intra_batch_workers=config["default"].get("max_intra_batch_workers", 3),
-                default_batch_size=config["default"].get("default_batch_size", 10),
-                min_batch_size=config["default"].get("min_batch_size", 1),
-                max_batch_size=config["default"].get("max_batch_size", 50),
-                max_rag_batch_queries=config["default"].get("max_rag_batch_queries", 10),
-                max_embed_batch_size=config["default"].get("max_embed_batch_size", 32),
-            )
-        
+            self._default_config = PolicyPortAdapter._policy_from_dict(config["default"])
+
         tenants = config.get("tenants", {})
         for tenant_id, tenant_config in tenants.items():
-            self._tenant_configs[tenant_id] = PolicyConfig(
-                max_parallel_sends=tenant_config.get("max_parallel_sends", self._default_config.max_parallel_sends),
-                max_intra_batch_workers=tenant_config.get("max_intra_batch_workers", self._default_config.max_intra_batch_workers),
-                default_batch_size=tenant_config.get("default_batch_size", self._default_config.default_batch_size),
-                min_batch_size=tenant_config.get("min_batch_size", self._default_config.min_batch_size),
-                max_batch_size=tenant_config.get("max_batch_size", self._default_config.max_batch_size),
-                max_rag_batch_queries=tenant_config.get("max_rag_batch_queries", self._default_config.max_rag_batch_queries),
-                max_embed_batch_size=tenant_config.get("max_embed_batch_size", self._default_config.max_embed_batch_size),
-            )
+            if isinstance(tenant_config, dict):
+                self._tenant_configs[tenant_id] = PolicyPortAdapter._policy_from_dict(
+                    tenant_config, self._default_config
+                )
     
     def _get_config(self, tenant_id: str) -> PolicyConfig:
         return self._tenant_configs.get(tenant_id, self._default_config)

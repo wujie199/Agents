@@ -16,6 +16,7 @@ from app.agents.context_builder import (
     validate_l1_key,
 )
 from app.agents.memory.conflict_detector import resolve_conflict, ConflictStrategy
+from app.agents.memory.memory_graph_state import append_pending_memory_delta
 
 _NAME_PATTERNS = (
     re.compile(r"^我叫(.+)$"),
@@ -93,11 +94,14 @@ async def auto_remember_name_intro(
     except Exception:
         pass
 
+    delta = MemoryDelta(key=key, value=name, source="user")
     await memory.update_prompt_memory(
         ctx.request,
-        MemoryDelta(key=key, value=name, source="user"),
+        delta,
         require_hitl=cfg.remember_require_hitl,
     )
+    if cfg.remember_require_hitl:
+        append_pending_memory_delta(ctx, delta, require_hitl=True)
     if cfg.remember_require_hitl:
         from app.agents.memory.memory_metrics import record_l1_pending
 

@@ -1,22 +1,9 @@
-# 并发策略配置
-# 用于 PolicyPortAdapter 的限流与预算控制
-
+# PolicyPort QPS/预算 + 聊天 API RPM 限流（max_qps 唯一来源）
 default:
-  max_parallel_sends: 5
-  max_intra_batch_workers: 3
-  default_batch_size: 10
-  min_batch_size: 1
-  max_batch_size: 50
-  max_rag_batch_queries: 10
-  max_embed_batch_size: 32
-  # QPS 限流
   max_qps_per_tenant: 100
-  # Token 预算
   token_budget_per_user: 100000
 
-# 租户级覆盖（示例）
-# tenants:
-#   vip_tenant:
-#     max_qps_per_tenant: 500
-#     token_budget_per_user: 500000
-#     max_parallel_sends: 10
+chat:
+  enabled: true
+  tenant_requests_per_minute: 60
+  user_requests_per_minute: 20

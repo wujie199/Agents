@@ -9,7 +9,7 @@ from document.rag.config import RagPipelineConfig
 from dataclasses import replace
 from document.rag.components.embedding.mock import MockEmbeddingModel
 from document.rag.application.indexing.service import IndexService
-from document.rag.components.ingest.plain_text_adapter import PlainTextIngestAdapter
+from document.rag.components.ingest.plain_text import PlainTextIngestAdapter
 from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 
 

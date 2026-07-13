@@ -18,7 +18,11 @@ bundle = await ctx.rag.route_and_retrieve(
 - **输出**：`EvidenceBundle`（`evidences[]` + `plan` + 可选 `degraded_reason`）
 - **禁止**：在业务里拼 SQL/Cypher，或 `import` `rag/adapters/*`、`storage/adapters/chroma`
 
-组合根：`build_production_context` / `build_development_context` 已装配 `RAGPortAdapter`，并在 `config/rag_pipeline.yml` 中 `retrieval.enable_router: true` 时委托 `RetrievalRouter`。
+组合根：`build_production_context` / `build_development_context` 已装配 `RAGPortAdapter`。  
+`config/rag.yml`（或 profile 如 `rag.faq.yml`）中：
+
+- `retrieval.enable_hybrid: true` 且 `enable_router: false` → **hybrid 向量+BM25**（当前 faq/contract 默认）
+- `retrieval.enable_router: true` → 委托 `RetrievalRouter`（三库 / 自动路由）
 
 ---
 
@@ -123,7 +127,7 @@ bundle = await ctx.rag.route_and_retrieve(
 ## 3. 关闭自动路由（固定向量）
 
 ```yaml
-# config/rag_pipeline.yml
+# config/rag.yml
 retrieval:
   enable_router: true
   auto_route: false
@@ -134,14 +138,16 @@ retrieval:
 
 ---
 
-## 4. 完全关闭 Router（仅向量实现）
+## 4. 关闭 Router，使用 hybrid 或纯向量
 
 ```yaml
+# config/rag.yml
 retrieval:
   enable_router: false
+  enable_hybrid: true   # faq/contract 默认：向量 + BM25 → rerank
 ```
 
-`RAGPortAdapter` 仅执行内置向量检索（与 MVP 最初行为一致）。
+`enable_router: false` 时 `RAGPortAdapter` 不走 `RetrievalRouter`；若 `enable_hybrid: true` 则走 `hybrid_retrieve`，否则仅向量检索。
 
 ---
 

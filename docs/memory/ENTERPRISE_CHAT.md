@@ -70,6 +70,34 @@ Context 预检索：`session_search_prefetch_scope`（auto/session/user）、`sk
 |---------------------|------|
 | `file` | 默认；`l1_use_file_lock` 支持多 Pod 共享 PVC |
 | `relational` | PG/SQLite 同库 `hot_memory_docs` 表（生产 PG 推荐） |
+| `langgraph` | LangGraph `BaseStore` namespace `("memory", tenant_id)`；生产与 `DATABASE_URL` 共用 PostgresStore |
+
+## 记忆评测
+
+| 短名 | 覆盖 |
+|------|------|
+| `sample` | L1 extract / session_search 冒烟 |
+| `enterprise` | L2 session_search + L1 extract |
+| `hitl_finalize` | pending delta → finalize → L1 |
+| `l4_merge` | L4 画像合并 |
+
+```bash
+# 快速 smoke（mock，无 LLM）
+python scripts/memory_eval.py --dataset sample.jsonl --mock-only --run-id smoke
+
+# 企业级专项（短路径自动解析到 data/memory_eval/golden/）
+python scripts/memory_eval.py --dataset enterprise.jsonl --mock-only
+python scripts/memory_eval.py --dataset hitl_finalize.jsonl --mock-only
+python scripts/memory_eval.py --dataset l4_merge.jsonl --mock-only
+
+# 批量
+python scripts/memory_eval.py --datasets enterprise hitl_finalize l4_merge --mock-only --run-id batch
+
+# 真 LLM 抽取（需 ModelRegistry；不可用时自动回退 mock_extract）
+python scripts/memory_eval.py --dataset sample.jsonl --use-llm
+
+# 报告：data/memory_eval/results/{run_id}/summary.json
+```
 
 ## 4. Checkpointer
 
@@ -112,6 +140,7 @@ HTTP RequestContext → Middleware 链 → LangGraph 节点
   PrivacyMiddleware         PII 检测
   ErrorClassifierMiddleware graph.node.errors_total（on error）
   AuditMiddleware           hash 审计 + 可选 NDJSON 持久化
+  ConversationAuditMiddleware  turn 级审计包（prepare 检索 + persist 汇总）
 ReAct agent 节点：astream_events(v2) → agent.tool.* / agent.llm.*
 ```
 
@@ -131,10 +160,15 @@ observability:
   max_qps_per_tenant: 100
   audit_persist: false         # true → data/audit/audit_YYYY-MM-DD.jsonl
   audit_log_dir: data/audit
+  audit_content: redacted       # hash | redacted | full（turn 包 user/assistant 正文策略）
+  audit_include_retrieval: true # turn 包是否含 prepare 检索摘要
+  audit_include_tools: true     # turn 包是否含 agent_events 工具摘要
+  audit_max_content_chars: 8000
 ```
 
 - **Redis 限流**：设置 `observability.rate_limit_backend: redis` 或环境变量 `REDIS_URL` 时，PolicyMiddleware 使用 Redis 1 秒滑动窗口；Redis 不可用时 **fail-open** 回退进程内限流。
 - **审计持久化**：`audit_persist: true` 时追加 NDJSON，字段含 `trace_id`、`tenant_id`、`user_id`、`session_id`、`node`、`duration_ms`、`error`、`content_hashes`、`ts`。
+- **Turn 级审计**（`ConversationAuditMiddleware`）：`prepare` 暂存检索摘要，`persist` 写入 `data/audit/conversation_turn_YYYY-MM-DD.jsonl`。事件 `event_type=conversation.turn`，含 `user_input` / `assistant_text`（按 `audit_content`：`hash` 仅摘要、`redacted` 脱敏明文、`full` 原文截断）、`prepare`（intent、evidences、memory_summary）、`memory`（turn_decision、layer_triggers、l0_applied、pending）、`tools`（agent_events 摘要）、`nodes`（各节点耗时）。
 
 ### OpenTelemetry（可选）
 
@@ -158,9 +192,14 @@ pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-prot
 
 CLI：`python document/query_memory.py archive-health`、`checkpoint-health`
 
-## 7. 检索 LLM 路由（可选）
+## 7. 检索路由（L0）与 LLM guardrail
 
-`config/chat.yml` 中 `retrieval_llm_router: true` 启用 `router_llm` 意图分类；低置信度回退正则。
+- **规则版本**：`ROUTING_RULES_VERSION`（当前 `2026.07.06-p0`），写入 `RetrievalPlan.rules_version` 与 turn 审计。
+- **意图来源**：`intent_source` = `hard_rule` | `regex` | `llm:0.xx` | `regex:llm_rejected:0.xx`。
+- **硬规则 fast path**（LLM 不可覆盖）：skill / profile（含姓名自述）/ 寒暄。
+- **细策略**：`recall_strategy` = `meta_recent` | `semantic` | `browse` | `none`（由正则决定，LLM 不输出 strategy）。
+- **LLM 路由**（`retrieval_llm_router: true`）：仅 **歧义 query** 调用；`validate_llm_intent` guardrail 拒绝违背硬规则的 LLM 标签。
+- **Golden**：`tests/fixtures/routing_golden.yml`（≥50 条）+ `tests/test_routing_golden.py` CI。
 
 ## 8. 定时任务
 

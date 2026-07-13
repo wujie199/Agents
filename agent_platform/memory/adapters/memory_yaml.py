@@ -50,6 +50,21 @@ def _is_flat_memory_raw(raw: dict[str, Any]) -> bool:
     return any(key in raw for key in _FLAT_MARKERS)
 
 
+def deep_merge_memory_config(
+    base: dict[str, Any],
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    """memory.yml 基座 + 增量：嵌套 dict 递归合并，标量/列表以 overlay 为准。"""
+    result = dict(base)
+    for key, overlay_val in overlay.items():
+        base_val = result.get(key)
+        if isinstance(overlay_val, dict) and isinstance(base_val, dict):
+            result[key] = deep_merge_memory_config(base_val, overlay_val)
+        else:
+            result[key] = overlay_val
+    return result
+
+
 def flatten_memory_yaml(raw: dict[str, Any]) -> dict[str, Any]:
     """将分段 memory.yml 展平为 legacy 键值 dict。"""
     if _is_flat_memory_raw(raw):
@@ -123,7 +138,7 @@ def load_memory_yaml_document(
     config_dir: str = "config",
     memory_profile: Optional[str] = None,
 ) -> dict[str, Any]:
-    """加载 YAML 并展平；MEMORY_PROFILE 仅对 config/memory.yml 生效。"""
+    """加载 YAML 并展平；非 memory.yml 与基座深合并；MEMORY_PROFILE 仅对 base 生效。"""
     path = Path(config_path)
     raw = _read_yaml(path)
 
@@ -143,6 +158,16 @@ def load_memory_yaml_document(
         base = memory_base_path(config_dir)
         raw = _read_yaml(base)
         memory_profile = memory_profile or legacy_profile_map[path.name]
+
+    base_path = memory_base_path(config_dir)
+    base_raw = _read_yaml(base_path)
+    if (
+        path.resolve() != base_path.resolve()
+        and base_raw
+        and raw
+        and not _is_flat_memory_raw(raw)
+    ):
+        raw = deep_merge_memory_config(base_raw, raw)
 
     flat = flatten_memory_yaml(raw)
     profile_key = memory_profile or os.environ.get("MEMORY_PROFILE")

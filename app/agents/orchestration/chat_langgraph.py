@@ -15,6 +15,12 @@ _think_dbg = logging.getLogger("thinking_debug")
 from core.composition.run_context import RunContext
 
 from app.agents.memory.l0_context import maybe_compress_turn_context
+from app.agents.memory.memory_graph_state import (
+    l0_compress_triggered,
+    merge_memory_summary_with_state,
+    read_graph_memory_snapshot,
+    update_graph_memory_snapshot,
+)
 from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
 from app.agents.orchestration.chat_nodes import fetch_turn_history, persist_user_and_assistant
 from app.agents.orchestration.chat_turn import ChatTurnResult
@@ -76,7 +82,7 @@ async def run_chat_turn_langgraph(
     *,
     enable_rag: Optional[bool] = None,
 ) -> ChatTurnResult:
-    """执行一轮 LangGraph 对话（prepare → react_agent → persist）。"""
+    """执行一轮 LangGraph 对话（prepare → agent → compress → persist）。"""
     from app.agents.memory.memory_runtime_debug import perf_mark
 
     use_rag = (
@@ -111,7 +117,13 @@ async def run_chat_turn_langgraph(
         rag_empty=bool(final.get("rag_empty", True)),
         history_turns=len(history),
         evidences_summary=final.get("evidences_summary") or [],
-        memory_summary=final.get("memory_summary") or {},
+        memory_summary=merge_memory_summary_with_state(
+            final.get("memory_summary"), final
+        ),
+        retrieval_intent=str(final.get("retrieval_intent") or ""),
+        memory_path=str(final.get("memory_path") or ""),
+        l0_applied=bool(final.get("l0_applied")),
+        pending_remember=final.get("pending_remember"),
     )
 
 
@@ -134,7 +146,15 @@ async def _stream_direct_after_prepare(
             "evidence_count": evidence_count,
             "rag_empty": rag_empty,
             "evidences_summary": evidences_summary or [],
-            "memory_summary": memory_summary or {},
+            "memory_summary": merge_memory_summary_with_state(
+                memory_summary,
+                {
+                    "retrieval_intent": str((ctx.extra or {}).get("retrieval_intent") or ""),
+                    "memory_path": "path_b" if session.chat_cfg.enable_memory_tools else "path_a",
+                    "pending_remember": (ctx.extra or {}).get("pending_remember"),
+                    "l0_applied": False,
+                },
+            ),
             "stream": "direct_llm",
         },
         ensure_ascii=False,
@@ -185,12 +205,16 @@ async def _stream_direct_after_prepare(
         dict_msgs.append({"role": role, "content": str(m.content or "")})
     dict_msgs.append({"role": "assistant", "content": assistant_text})
     mem_hash = memory_snapshot_hash or str((memory_summary or {}).get("memory_snapshot_hash") or "")
+    compress_before = int((getattr(ctx, "extra", None) or {}).get("_l0_compress_count") or 0)
     await maybe_compress_turn_context(
         ctx,
         dict_msgs,
         chat_cfg=session.chat_cfg,
         memory_snapshot_hash=mem_hash,
     )
+    l0_applied = l0_compress_triggered(ctx, compress_before)
+    update_graph_memory_snapshot(ctx, l0_applied=l0_applied)
+    wm = read_graph_memory_snapshot(ctx)
     # ── P3: persist 与 history 读取并行化 ──
     _persist_task = asyncio.create_task(
         persist_user_and_assistant(
@@ -214,6 +238,8 @@ async def _stream_direct_after_prepare(
             "assistant_text": assistant_text,
             "session_id": ctx.request.session_id,
             "history_turns": len(history),
+            "memory_summary": merge_memory_summary_with_state(memory_summary, wm),
+            "l0_applied": l0_applied,
         },
         ensure_ascii=False,
     )
@@ -289,7 +315,9 @@ async def stream_chat_turn_langgraph_events(
                             ),
                             "rag_empty": bool(output.get("rag_empty", True)),
                             "evidences_summary": output.get("evidences_summary") or [],
-                            "memory_summary": output.get("memory_summary") or {},
+                            "memory_summary": merge_memory_summary_with_state(
+                                output.get("memory_summary"), output
+                            ),
                             "stream": "langgraph",
                         },
                         ensure_ascii=False,
@@ -387,7 +415,9 @@ async def stream_chat_turn_langgraph_events(
                     "evidence_count": int(final.get("evidence_count") or 0),
                     "rag_empty": bool(final.get("rag_empty", True)),
                     "evidences_summary": final.get("evidences_summary") or [],
-                    "memory_summary": final.get("memory_summary") or {},
+                    "memory_summary": merge_memory_summary_with_state(
+                        final.get("memory_summary"), final
+                    ),
                     "stream": "batch",
                 },
                 ensure_ascii=False,
@@ -439,6 +469,10 @@ async def stream_chat_turn_langgraph_events(
             "assistant_text": assistant_text,
             "session_id": ctx.request.session_id,
             "history_turns": len(history),
+            "memory_summary": merge_memory_summary_with_state(
+                final_state.get("memory_summary"), final_state
+            ),
+            "l0_applied": bool(final_state.get("l0_applied")),
         },
         ensure_ascii=False,
     )

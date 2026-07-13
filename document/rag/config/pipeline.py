@@ -16,6 +16,7 @@ from document.rag.config.rewrite import (
     TwoStageConfig,
     parse_rewrite_profiles,
 )
+from document.rag.config.chunk_pipeline import ChunkPipelineConfig, parse_chunk_pipeline_config
 from document.rag.config.rag_yaml import (
     RAG_PROFILES,
     RAG_PIPELINE_PROFILES,
@@ -32,7 +33,7 @@ class RagPipelineConfig:
     enable_graph_index: bool = False
     chunk_size: int = 200
     chunk_overlap: int = 20
-    chunk_strategy: str = "faq"
+    chunk_strategy: str = "seven_step"
     default_top_k: int = 10
     rerank_top_n: int = 5
     enable_cache: bool = True
@@ -49,6 +50,7 @@ class RagPipelineConfig:
     enable_semantic_dedupe: bool = False
     semantic_dedupe_threshold: float = 0.85
     cleaners: Optional[Dict[str, Any]] = None
+    chunk_pipeline: ChunkPipelineConfig = field(default_factory=ChunkPipelineConfig)
 
 
 def warn_model_instances(config_dir: str = "config") -> None:
@@ -92,8 +94,10 @@ def compute_index_config_hash(cfg: RagPipelineConfig) -> str:
         "collection_name": cfg.collection_name,
         "enable_chunk_dedupe": cfg.enable_chunk_dedupe,
         "enable_semantic_dedupe": cfg.enable_semantic_dedupe,
+        "chunk_pipeline": asdict(cfg.chunk_pipeline),
         "embedding": asdict(cfg.embedding),
         "cleaners": cfg.cleaners,
+        "ingest": asdict(cfg.ingest),
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -169,7 +173,7 @@ def load_rag_pipeline_config(
         enable_graph_index=raw.get("enable_graph_index", False),
         chunk_size=raw.get("chunk_size", 200),
         chunk_overlap=raw.get("chunk_overlap", 20),
-        chunk_strategy=str(raw.get("chunk_strategy", "faq")),
+        chunk_strategy=str(raw.get("chunk_strategy", "seven_step")),
         default_top_k=raw.get("default_top_k", 10),
         rerank_top_n=raw.get("rerank_top_n", 5),
         enable_cache=raw.get("enable_cache", True),
@@ -181,6 +185,40 @@ def load_rag_pipeline_config(
             model_path=embedding_raw.get("model_path"),
             device=embedding_raw.get("device"),
             normalize=embedding_raw.get("normalize", True),
+            max_tokens=int(embedding_raw.get("max_tokens", 512)),
+            truncate_marker=str(embedding_raw.get("truncate_marker", "[...]")),
+            query_instruction=str(
+                embedding_raw.get(
+                    "query_instruction",
+                    "为这个句子生成表示以用于检索相关文章：",
+                )
+            ),
+            doc_instruction=str(embedding_raw.get("doc_instruction", "")),
+            batch_size=int(
+                embedding_raw.get("batch_size", raw.get("embedding_batch_size", 32))
+            ),
+            batch_size_min=int(embedding_raw.get("batch_size_min", 1)),
+            oom_halve_retry=bool(embedding_raw.get("oom_halve_retry", True)),
+            force_l2_normalize=bool(embedding_raw.get("force_l2_normalize", True)),
+            verify_unit_norm=bool(embedding_raw.get("verify_unit_norm", True)),
+            unit_norm_tolerance=float(embedding_raw.get("unit_norm_tolerance", 0.02)),
+            reject_zero_vectors=bool(embedding_raw.get("reject_zero_vectors", True)),
+            matryoshka_dim=embedding_raw.get("matryoshka_dim"),
+            write_max_retries=int(embedding_raw.get("write_max_retries", 3)),
+            dlq_path=str(embedding_raw.get("dlq_path", "data/rag_offline/embedding_dlq.jsonl")),
+            enable_chunk_incremental=bool(
+                embedding_raw.get("enable_chunk_incremental", True)
+            ),
+            enable_embedding_cache_read=bool(
+                embedding_raw.get("enable_embedding_cache_read", True)
+            ),
+            incremental_on_reindex=bool(
+                embedding_raw.get("incremental_on_reindex", True)
+            ),
+            force_full_delete_on_reindex=bool(
+                embedding_raw.get("force_full_delete_on_reindex", False)
+            ),
+            versioned_collection=bool(embedding_raw.get("versioned_collection", False)),
         ),
         rerank=RerankConfig(
             backend=str(rerank_raw.get("backend", "local_bge")),
@@ -208,6 +246,7 @@ def load_rag_pipeline_config(
             ocr_use_layout=ingest_raw.get("ocr_use_layout", True),
             enable_cleaning=ingest_raw.get("enable_cleaning", True),
             ocr_postprocess=ingest_raw.get("ocr_postprocess", True),
+            ocr_preserve_structure=bool(ingest_raw.get("ocr_preserve_structure", True)),
             cleaning_level=str(ingest_raw.get("cleaning_level", "standard")),
             ocr_model_root=ingest_raw.get("ocr_model_root"),
             ocr_device=str(ingest_raw.get("ocr_device", "cpu")),
@@ -215,7 +254,13 @@ def load_rag_pipeline_config(
             ocr_enable_formula=bool(ingest_raw.get("ocr_enable_formula", True)),
             ocr_formula_model=ingest_raw.get("ocr_formula_model"),
             ocr_max_attempts=int(ingest_raw.get("ocr_max_attempts", 3)),
-            ocr_fast=bool(ingest_raw.get("ocr_fast", True)),
+            ocr_layout_threshold=float(
+                ingest_raw.get("ocr_layout_threshold", 0.5)
+            ),
+            ocr_layout_score_threshold=float(
+                ingest_raw.get("ocr_layout_score_threshold", 0.5)
+            ),
+            ocr_fast=bool(ingest_raw.get("ocr_fast", False)),
             ocr_table_e2e=bool(ingest_raw.get("ocr_table_e2e", False)),
             ocr_enable_mkldnn=bool(ingest_raw.get("ocr_enable_mkldnn", True)),
             enable_header_footer_dedup=bool(
@@ -224,11 +269,14 @@ def load_rag_pipeline_config(
             header_footer_threshold=float(
                 ingest_raw.get("header_footer_threshold", 0.3)
             ),
+            enable_pdf_routing=bool(ingest_raw.get("enable_pdf_routing", True)),
+            pdf_threads=max(1, int(ingest_raw.get("pdf_threads", 1))),
         ),
         enable_chunk_dedupe=bool(raw.get("enable_chunk_dedupe", False)),
         enable_semantic_dedupe=bool(raw.get("enable_semantic_dedupe", False)),
         semantic_dedupe_threshold=float(raw.get("semantic_dedupe_threshold", 0.85)),
         cleaners=raw.get("cleaners"),
+        chunk_pipeline=parse_chunk_pipeline_config(raw.get("chunk_pipeline")),
         retrieval=RetrievalConfig(
             primary_backend=retrieval_raw.get("primary_backend", "vector"),
             enable_rerank=retrieval_raw.get("enable_rerank", False),

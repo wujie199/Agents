@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from app.agents.orchestration.chat_config import ChatAgentConfig
-from app.agents.roles.retrieval_router import build_retrieval_plan, classify_intent
+from app.agents.roles.retrieval_router import (
+    build_retrieval_plan,
+    classify_intent,
+    resolve_recall_strategy,
+)
 
 
 def _cfg(**overrides):
@@ -30,8 +34,9 @@ def test_classify_recall():
 
 
 def test_classify_mixed_recall_knowledge():
-    """混合意图：回忆+知识倾向 → recall_and_knowledge。"""
-    assert classify_intent("之前我们聊过什么", _cfg()) == "recall_and_knowledge"
+    """混合意图：回忆+知识倾向 → recall_and_knowledge；纯 meta 枚举 → recall。"""
+    assert classify_intent("之前我们聊过什么", _cfg()) == "recall"
+    assert classify_intent("上次说的那个品牌怎么样", _cfg()) == "recall_and_knowledge"
 
 
 def test_classify_chitchat():
@@ -64,13 +69,35 @@ def test_recall_skips_rag():
     plan = build_retrieval_plan("还记得上次说的吗", _cfg(), enable_rag=True)
     assert plan.intent == "recall"
     assert plan.run_session_search
+    assert plan.recall_strategy == "semantic"
     assert not plan.run_rag
     assert plan.skip_rag_reason == "recall_intent"
 
 
+def test_meta_recall_strategy_in_plan():
+    plan = build_retrieval_plan("之前问过什么", _cfg(), enable_rag=True)
+    assert plan.intent == "recall"
+    assert plan.recall_strategy == "meta_recent"
+    assert plan.recall_scope == "session"
+
+
+def test_resolve_recall_strategy_topic():
+    cfg = _cfg()
+    assert (
+        resolve_recall_strategy(
+            "上次说的清洁方案怎么样", cfg, intent="recall"
+        )
+        == "semantic"
+    )
+    assert (
+        resolve_recall_strategy("之前问过什么", cfg, intent="recall")
+        == "meta_recent"
+    )
+
+
 def test_mixed_recall_knowledge_runs_rag_and_session_search():
     """混合意图同时走 session_search 和 RAG。"""
-    plan = build_retrieval_plan("之前说过什么品牌", _cfg(), enable_rag=True)
+    plan = build_retrieval_plan("上次说的那个品牌怎么样", _cfg(), enable_rag=True)
     assert plan.intent == "recall_and_knowledge"
     assert plan.run_session_search
     assert plan.run_rag

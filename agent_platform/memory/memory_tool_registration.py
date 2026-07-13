@@ -9,13 +9,14 @@ from core.composition.run_context import RunContext
 
 
 def register_memory_tools(tools: Any, memory: Any) -> None:
+    memory_port = memory
     async def session_search(
         query: str,
         context: RequestContext,
         limit: int = 5,
         scope: str = "session",
     ) -> str:
-        return await memory.session_search(
+        return await memory_port.session_search(
             query, context, limit=limit, scope=scope
         )
 
@@ -25,7 +26,7 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
         limit: int = 5,
         scope: str = "session",
     ) -> dict:
-        result = await memory.session_search_detail(
+        result = await memory_port.session_search_detail(
             query, context, limit=limit, scope=scope
         )
         return result.to_dict()
@@ -35,7 +36,7 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
         context: RequestContext,
         limit: int = 3,
     ) -> List[dict]:
-        hits = await memory.skill_search(query, context, limit=limit)
+        hits = await memory_port.skill_search(query, context, limit=limit)
         return [
             {
                 "skill_id": h.skill_id,
@@ -55,8 +56,8 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
         context: RequestContext,
         inputs: dict | None = None,
     ) -> dict:
-        run_ctx = RunContext(request=context, memory=memory, tools=tools)
-        result = await memory.run_skill(
+        run_ctx = RunContext(request=context, memory=memory_port, tools=tools)
+        result = await memory_port.run_skill(
             skill_id, inputs or {}, context, run_ctx
         )
         return {
@@ -71,7 +72,7 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
         mention: str,
         context: RequestContext,
     ) -> dict | None:
-        entity = await memory.resolve_entity(mention, context)
+        entity = await memory_port.resolve_entity(mention, context)
         if entity is None:
             return None
         return {
@@ -83,11 +84,11 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
     async def fetch_profile_facts(
         context: RequestContext,
     ) -> List[dict]:
-        return await memory.fetch_profile_facts(
+        return await memory_port.fetch_profile_facts(
             context.tenant_id, context.user_id
         )
 
-    async def memory(
+    async def memory_tool(
         context: RequestContext,
         action: str,
         target: str = "memory",
@@ -95,7 +96,7 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
         old_text: str | None = None,
         operations: list | None = None,
     ) -> dict:
-        invoke = getattr(memory, "invoke_memory_tool", None)
+        invoke = getattr(memory_port, "invoke_memory_tool", None)
         if invoke is None:
             return {"success": False, "error": "L1 memory tool not available."}
         return invoke(
@@ -117,4 +118,4 @@ def register_memory_tools(tools: Any, memory: Any) -> None:
     tools.register_tool(
         "fetch_profile_facts", fetch_profile_facts, acl=["user", "cli"]
     )
-    tools.register_tool("memory", memory, acl=["user"])
+    tools.register_tool("memory", memory_tool, acl=["user"])

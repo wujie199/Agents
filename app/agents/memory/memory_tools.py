@@ -13,7 +13,21 @@ from core.ports.memory import MemoryDelta
 
 from app.agents.orchestration.chat_config import ChatAgentConfig
 from app.agents.context_builder import validate_l1_key
+from app.agents.memory.memory_graph_state import (
+    append_pending_memory_delta,
+    record_l1_write,
+    record_memory_tool_result,
+)
 from app.agents.memory.memory_metrics import record_session_search
+
+
+def _default_hermes_mode(ctx: RunContext) -> str:
+    extra = getattr(ctx, "extra", None)
+    if isinstance(extra, dict):
+        raw = extra.get("session_search_default_hermes_mode")
+        if raw:
+            return str(raw).lower()
+    return "discovery"
 
 
 def build_memory_tools(
@@ -34,7 +48,7 @@ def build_memory_tools(
         """搜索会话历史。mode=discovery|scroll|read|browse；scope 仅 legacy 摘要路径使用。"""
         memory = ctx.require_memory()
         use_scope = "user" if str(scope).lower() == "user" else "session"
-        use_mode = (mode or "discovery").strip().lower()
+        use_mode = (mode or _default_hermes_mode(ctx)).strip().lower()
         if use_mode in ("discovery", "scroll", "read", "browse"):
             text = await memory.session_search(
                 query,
@@ -64,11 +78,13 @@ def build_memory_tools(
             return "错误：value 不能为空"
         memory = ctx.require_memory()
         if chat_cfg.remember_require_hitl:
+            delta = MemoryDelta(key=safe_key, value=val, source="user")
             await memory.update_prompt_memory(
                 ctx.request,
-                MemoryDelta(key=safe_key, value=val, source="user"),
+                delta,
                 require_hitl=True,
             )
+            append_pending_memory_delta(ctx, delta, require_hitl=True)
             return (
                 f"已加入待确认记忆：{safe_key}={val}。"
                 "输入 /pending 查看，/confirm 立即写入 L1；"
@@ -84,13 +100,23 @@ def build_memory_tools(
             )
             if not result.get("success"):
                 return json.dumps(result, ensure_ascii=False)
+            record_l1_write(
+                ctx,
+                key=safe_key,
+                value=val,
+                source="user",
+                require_hitl=False,
+            )
             return f"已记住：{safe_key}={val}"
+        delta = MemoryDelta(key=safe_key, value=val, source="user")
         await memory.update_prompt_memory(
             ctx.request,
-            MemoryDelta(key=safe_key, value=val, source="user"),
+            delta,
             require_hitl=False,
         )
-        return f"已记住：{safe_key}={val}"
+        record_l1_write(
+            ctx, key=safe_key, value=val, source="user", require_hitl=False
+        )
 
     async def memory(
         action: str,
@@ -126,6 +152,14 @@ def build_memory_tools(
             old_text=old_text,
             operations=ops,
         )
+        if isinstance(result, dict):
+            record_memory_tool_result(
+                ctx,
+                result,
+                action=action,
+                target=target,
+                content=content,
+            )
         return json.dumps(result, ensure_ascii=False)
 
     tools: List[StructuredTool] = [

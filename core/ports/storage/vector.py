@@ -49,5 +49,12 @@ class VectorPort(Protocol):
     ) -> int:
         ...
 
+    def list_ids_by_filter(
+        self,
+        collection: str,
+        filter: dict,
+    ) -> List[str]:
+        ...
+
     def get_index_version(self, collection: str) -> str:
         ...

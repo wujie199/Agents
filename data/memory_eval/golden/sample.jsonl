@@ -1,0 +1,2 @@
+{"id": "ss-maint-1", "kind": "session_search", "tenant_id": "eval_tenant", "user_id": "eval_user", "session_id": "ss_maint_1", "query": "维护周期多久", "expected_keywords": ["维护", "周期"], "seed_turns": [{"role": "user", "content": "扫地机器人维护周期是多久？"}, {"role": "assistant", "content": "建议每 3 个月清理一次尘盒，每 6 个月更换滤网。"}], "tags": ["l2", "maintenance"]}
+{"id": "l1-lang-1", "kind": "l1_extract", "transcript": "User: 以后请用中文简短回答\nAssistant: 好的，我会用中文简短回复。", "expected_kv": {"语言": "中文"}, "mock_extract": [{"key": "语言", "value": "中文"}], "tags": ["l1", "preference"]}

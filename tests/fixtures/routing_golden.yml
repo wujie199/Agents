@@ -1,0 +1,82 @@
+# 检索路由 golden（P0）：正则 + recall_strategy，不依赖 LLM
+version: "2026.07.06-p0"
+
+scenarios:
+  # ── meta 回忆 ──
+  - { id: meta_01, query: "之前问过你什么问题", expect_intent: recall, expect_recall_strategy: meta_recent, expect_session_search: true, expect_rag: false }
+  - { id: meta_02, query: "我们聊过什么", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_03, query: "之前都问过什么", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_04, query: "聊过什么内容", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_05, query: "历史问题有哪些", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_06, query: "记得我问过什么吗", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_07, query: "之前说过什么", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_08, query: "我们之前聊了什么", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_09, query: "都聊过什么", expect_intent: recall, expect_recall_strategy: meta_recent }
+  - { id: meta_10, query: "问过哪些问题", expect_intent: recall, expect_recall_strategy: meta_recent }
+
+  # ── 跨会话 meta ──
+  - { id: cross_meta_01, query: "别的会话里说过什么", expect_intent: recall, expect_recall_strategy: browse, expect_scope: user }
+  - { id: cross_meta_02, query: "历史会话里问过什么", expect_intent: recall, expect_recall_strategy: browse, expect_scope: user }
+  - { id: cross_meta_03, query: "跨会话我之前聊过什么", expect_intent: recall, expect_recall_strategy: browse, expect_scope: user }
+
+  # ── 指向性回忆（semantic） ──
+  - { id: topic_01, query: "还记得我上次说的吗", expect_intent: recall, expect_recall_strategy: semantic, expect_rag: false }
+  - { id: topic_02, query: "上次提到的清洁方案", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_03, query: "之前问的清洁保养怎么办", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_04, query: "刚才说的那个型号", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_05, query: "早些时候讨论的安装问题", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_06, query: "前面提到的故障代码", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_07, query: "之前聊的退货政策", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: topic_08, query: "上次说的联系方式", expect_intent: recall, expect_recall_strategy: semantic }
+
+  # ── 混合意图 recall_and_knowledge ──
+  - { id: mixed_01, query: "上次说的那个品牌怎么样", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+  - { id: mixed_02, query: "之前问的清洁方案如何实施", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+  - { id: mixed_03, query: "上次提到的型号好不好", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+  - { id: mixed_04, query: "之前说的安装方法对不对", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+  - { id: mixed_05, query: "刚才那个方案能行吗", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+  - { id: mixed_06, query: "上次问的配置建议怎么样", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic, expect_rag: true }
+
+  # ── 非 meta：什么+话题（走 semantic / mixed，非 meta_recent） ──
+  - { id: guard_01, query: "之前说过什么品牌", expect_intent: recall, expect_recall_strategy: semantic }
+  - { id: guard_02, query: "上次说的清洁方案怎么样了", expect_intent: recall_and_knowledge, expect_recall_strategy: semantic }
+
+  # ── 知识 / RAG ──
+  - { id: know_01, query: "扫地机器人有什么优点", expect_intent: knowledge, expect_rag: true, expect_recall_strategy: semantic }
+  - { id: know_02, query: "如何选择扫地机器人", expect_intent: knowledge, expect_rag: true }
+  - { id: know_03, query: "尘盒多久清理一次", expect_intent: knowledge, expect_rag: true }
+  - { id: know_04, query: "激光导航和视觉导航区别", expect_intent: knowledge, expect_rag: true }
+  - { id: know_05, query: "保修政策是什么", expect_intent: knowledge, expect_rag: true }
+  - { id: know_06, query: "机器人无法充电怎么办", expect_intent: knowledge, expect_rag: true }
+  - { id: know_07, query: "支持哪些支付方式", expect_intent: knowledge, expect_rag: true }
+  - { id: know_08, query: "APP连接失败排查步骤", expect_intent: knowledge, expect_rag: true }
+  - { id: know_09, query: "记住我喜欢 JSON 输出", expect_intent: knowledge, expect_rag: true }
+  - { id: know_10, query: "拖布多久更换", expect_intent: knowledge, expect_rag: true }
+
+  # ── 寒暄 ──
+  - { id: chat_01, query: "你好", expect_intent: chitchat, expect_rag: false, expect_recall_strategy: none }
+  - { id: chat_02, query: "谢谢", expect_intent: chitchat, expect_rag: false }
+  - { id: chat_03, query: "在吗", expect_intent: chitchat, expect_rag: false }
+  - { id: chat_04, query: "hello", expect_intent: chitchat, expect_rag: false }
+  - { id: chat_05, query: "再见", expect_intent: chitchat, expect_rag: false }
+  - { id: chat_06, query: "好的", expect_intent: chitchat, expect_rag: false }
+
+  # ── 画像 / profile（hard_rule） ──
+  - { id: prof_01, query: "叫武杰", expect_intent: profile, expect_rag: false, expect_intent_source: hard_rule }
+  - { id: prof_02, query: "我叫李明", expect_intent: profile, expect_intent_source: hard_rule }
+  - { id: prof_03, query: "你知道我的名字吗", expect_intent: profile, expect_rag: false }
+  - { id: prof_04, query: "我的部门是什么", expect_intent: profile, expect_rag: false }
+  - { id: prof_05, query: "CRM里我的资料", expect_intent: profile, expect_rag: false }
+  - { id: prof_06, query: "你知道我的哪些信息", expect_intent: profile, expect_rag: false }
+
+  # ── 技能（hard_rule） ──
+  - { id: skill_01, query: "用 json_section 技能处理", expect_intent: skill, expect_rag: false, expect_intent_source: hard_rule }
+  - { id: skill_02, query: "执行 report_context 流程", expect_intent: skill, expect_rag: false }
+  - { id: skill_03, query: "运行 session_lookup 技能", expect_intent: skill, expect_intent_source: hard_rule }
+  - { id: skill_04, query: "按 workflow 模板生成", expect_intent: skill, expect_rag: false }
+  - { id: skill_05, query: "用技能导出报告", expect_intent: skill, expect_rag: false }
+
+  # ── 歧义候选（应标记 ambiguous，但不跑 LLM 时仍 regex） ──
+  - { id: ambig_01, query: "还记得吗", expect_ambiguous: true }
+  - { id: ambig_02, query: "上次说的那个呢", expect_ambiguous: true }
+  - { id: ambig_03, query: "之前那个", expect_ambiguous: true }

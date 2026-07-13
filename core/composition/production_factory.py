@@ -78,6 +78,7 @@ def _build_memory_port(
         cfg,
         archive_db=archive_db,
         store_dir_override=store_dir_override,
+        database_url=os.environ.get("DATABASE_URL"),
     )
     fallback_summarizer = TruncatingSummarizerAdapter(
         max_chars=cfg.get("session_search_max_chars", 2000)

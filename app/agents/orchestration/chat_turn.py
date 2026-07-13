@@ -13,6 +13,14 @@ from agent_platform.memory.adapters.turn_buffer import TurnBuffer
 from app.agents.orchestration.chat_config import ChatAgentConfig, load_chat_config
 from app.agents.orchestration.chat_nodes import build_turn_messages, persist_user_and_assistant
 from app.agents.memory.l0_context import maybe_compress_turn_context, store_prompt_tokens_from_response
+from app.agents.memory.memory_graph_state import (
+    l0_compress_triggered,
+    merge_memory_summary_with_state,
+    pending_memory_delta_from_ctx,
+    resolve_memory_path,
+    store_graph_memory_snapshot,
+    working_memory_from_ctx,
+)
 from app.agents.observability.trace_context import resolve_trace_id
 from app.agents.roles.react_loop import _extract_llm_text, _resolve_turn_buffer
 from app.agents.roles.react_turn import (
@@ -31,6 +39,11 @@ class ChatTurnResult:
     history_turns: int = 0
     evidences_summary: list = None
     memory_summary: dict = None
+    retrieval_intent: str = ""
+    memory_path: str = ""
+    l0_applied: bool = False
+    pending_remember: str | None = None
+    pending_memory_delta: list = None
 
 
 async def run_chat_turn(
@@ -82,12 +95,22 @@ async def run_chat_turn(
         assistant_text = _extract_llm_text(response)
 
     post_messages = [*messages, {"role": "assistant", "content": assistant_text}]
+    compress_before = int((getattr(ctx, "extra", None) or {}).get("_l0_compress_count") or 0)
     await maybe_compress_turn_context(
         ctx,
         post_messages,
         chat_cfg=cfg,
         memory_snapshot_hash=_mem_hash,
     )
+    l0_applied = l0_compress_triggered(ctx, compress_before)
+    wm_state = working_memory_from_ctx(ctx)
+    wm_state.setdefault("retrieval_intent", intent)
+    wm_state["memory_path"] = resolve_memory_path(cfg)
+    wm_state["l0_applied"] = l0_applied
+    if not wm_state.get("pending_memory_delta"):
+        wm_state["pending_memory_delta"] = pending_memory_delta_from_ctx(ctx)
+    store_graph_memory_snapshot(ctx, wm_state)
+    memory_summary_out = merge_memory_summary_with_state(memory_summary, wm_state)
 
     buf = _resolve_turn_buffer(ctx, turn_buffer)
     if persist:
@@ -117,5 +140,10 @@ async def run_chat_turn(
         rag_empty=rag_empty,
         history_turns=len(history),
         evidences_summary=evidences_summary or [],
-        memory_summary=memory_summary or {},
+        memory_summary=memory_summary_out or {},
+        retrieval_intent=intent,
+        memory_path=wm_state["memory_path"],
+        l0_applied=l0_applied,
+        pending_remember=wm_state.get("pending_remember"),
+        pending_memory_delta=list(wm_state.get("pending_memory_delta") or []),
     )

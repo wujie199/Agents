@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_platform.memory.adapters.config_loader import load_memory_config
 from agent_platform.memory.adapters.memory_yaml import (
     flatten_memory_yaml,
     load_memory_yaml_document,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PROD_MEMORY = str(REPO_ROOT / "config" / "memory.production.example.yml")
 
 
 def test_flatten_sectioned_memory_yml():
@@ -43,10 +48,20 @@ def test_memory_profile_l4_http(monkeypatch):
     assert "8765" in str(cfg.get("external_profiles_http_url"))
 
 
-def test_production_example_nested():
-    flat = load_memory_yaml_document("config/memory.production.example.yml")
-    assert flat.get("archive_backend") == "postgresql"
-    assert flat.get("l1_store_backend") == "relational"
+def test_production_example_nested(monkeypatch):
+    monkeypatch.setenv("MEMORY_CONFIG", PROD_MEMORY)
+    cfg = load_memory_config()
+    assert cfg.get("archive_backend") == "postgresql"
+    assert cfg.get("l1_store_backend") == "langgraph"
+    assert cfg.get("enable_session_vector_index") is True
+    assert cfg.get("cold_archive_encrypt_at_rest") is True
+
+
+def test_memory_production_merges_base(monkeypatch):
+    monkeypatch.setenv("MEMORY_CONFIG", PROD_MEMORY)
+    cfg = load_memory_config()
+    assert cfg.get("hot_memory_max_chars") == 2200
+    assert cfg.get("store_dir") == "data/memory_prod"
 
 
 def test_legacy_memory_config_env_fallback(monkeypatch):

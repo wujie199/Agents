@@ -1,14 +1,12 @@
-import logging
+"""摄取工厂 — detect_format + 按 config 构建 IngestPort（ocr_only）。"""
+
+from __future__ import annotations
+
 import mimetypes
 from pathlib import Path
-from typing import BinaryIO, Optional, Set
 
-from core.ports.ingest import DocumentFormat, IngestConfig, IngestPort, IngestResult
+from core.ports.ingest import DocumentFormat, IngestPort
 
-from document.rag.components.ingest.layout_ocr import LayoutOCRAdapter
-from document.rag.components.ingest.plain_text import PlainTextIngestAdapter
-from document.rag.components.ingest.simplified import SimplifiedIngestAdapter
-from document.rag.components.ingest.word import WordIngestAdapter
 from document.rag.components.ingest.registry import build_ingest
 from document.rag.config import RagPipelineConfig
 
@@ -44,87 +42,5 @@ def detect_format(path: str) -> DocumentFormat:
 
 
 def build_ingest_pipeline(config: RagPipelineConfig) -> IngestPort:
-    """按 config/rag_pipeline.yml ingest.mode 选择摄取适配器（见 adapters/registry）。"""
+    """按 config/rag.yml ingest.mode 选择摄取适配器（见 components/ingest/registry）。"""
     return build_ingest(config)
-
-
-def build_routed_ingest(cfg: RagPipelineConfig) -> IngestPort:
-    plain = PlainTextIngestAdapter()
-    word = WordIngestAdapter()
-    ocr = LayoutOCRAdapter(
-        ocr_backend=cfg.ingest.ocr_backend,
-        language=cfg.ingest.language,
-    )
-    return RoutedIngestAdapter(
-        plain_text_adapter=plain,
-        word_adapter=word,
-        layout_ocr_adapter=ocr,
-        plain_text_formats={e.lower().lstrip(".") for e in cfg.ingest.plain_text_formats},
-    )
-
-
-class RoutedIngestAdapter:
-    """按文件类型路由到结构化解析或 Layout OCR（structured 模式）。"""
-
-    def __init__(
-        self,
-        plain_text_adapter: PlainTextIngestAdapter,
-        word_adapter: WordIngestAdapter,
-        layout_ocr_adapter: LayoutOCRAdapter,
-        plain_text_formats: Optional[Set[str]] = None,
-    ):
-        self._plain = plain_text_adapter
-        self._word = word_adapter
-        self._ocr = layout_ocr_adapter
-        self._plain_exts = plain_text_formats or {"txt", "md", "markdown"}
-        self._logger = logging.getLogger("document.rag.ingest.routed")
-        self._fallback = SimplifiedIngestAdapter(
-            word_adapter=word_adapter,
-            layout_ocr_adapter=layout_ocr_adapter,
-        )
-
-    def ingest(
-        self,
-        source: BinaryIO,
-        doc_format: DocumentFormat,
-        doc_id: str,
-        config: Optional[IngestConfig] = None,
-        metadata: Optional[dict] = None,
-    ) -> IngestResult:
-        if doc_format == DocumentFormat.WORD:
-            self._logger.info("Ingest %s via Word adapter", doc_id)
-            return self._word.ingest(source, doc_format, doc_id, config, metadata)
-        if doc_format in (DocumentFormat.TEXT, DocumentFormat.MARKDOWN):
-            self._logger.info("Ingest %s via PlainText adapter", doc_id)
-            return self._plain.ingest(source, doc_format, doc_id, config, metadata)
-        self._logger.info("Ingest %s via Layout OCR adapter", doc_id)
-        return self._ocr.ingest(source, doc_format, doc_id, config, metadata)
-
-    def ingest_from_path(
-        self,
-        file_path: str,
-        doc_id: str,
-        config: Optional[IngestConfig] = None,
-        metadata: Optional[dict] = None,
-    ) -> IngestResult:
-        metadata = dict(metadata or {})
-        metadata["source_path"] = file_path
-        ext = Path(file_path).suffix.lower().lstrip(".")
-        doc_format = detect_format(file_path)
-
-        if ext in self._plain_exts:
-            return self._plain.ingest_from_path(file_path, doc_id, config, metadata)
-        if doc_format == DocumentFormat.WORD:
-            with open(file_path, "rb") as f:
-                return self._word.ingest(f, doc_format, doc_id, config, metadata)
-        return self._fallback.ingest_from_path(file_path, doc_id, config, metadata)
-
-    def supports_format(self, doc_format: DocumentFormat) -> bool:
-        return doc_format in (
-            DocumentFormat.WORD,
-            DocumentFormat.PDF,
-            DocumentFormat.IMAGE,
-            DocumentFormat.HTML,
-            DocumentFormat.TEXT,
-            DocumentFormat.MARKDOWN,
-        )

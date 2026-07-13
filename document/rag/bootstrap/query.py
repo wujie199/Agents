@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+from document.rag.application.embedding.collection import effective_collection_name
+from document.rag.application.chunking.parent_store import ParentChunkStore
 from document.rag.components.embedding.registry import build_embedding
 from document.rag.components.rerank.registry import build_rerank
 from document.rag.components.storage.registry import build_bm25_index
@@ -23,6 +25,8 @@ class QueryStack:
     bm25_index: Any
     rerank_model: Any
     chroma_dir: str
+    parent_store: Optional[ParentChunkStore] = None
+    collection: str = "agent"
 
 
 def create_query_stack(
@@ -41,15 +45,20 @@ def create_query_stack(
     from agent_platform.storage.adapters.chroma.vector_adapter import ChromaVectorAdapter
 
     cfg = cfg or load_rag_pipeline_config(config_dir=config_dir)
+    collection = effective_collection_name(cfg)
     chroma_dir = str(data_dir / "chroma_dev")
     vector_port = ChromaVectorAdapter(persist_directory=chroma_dir)
     embedding = build_embedding(cfg)
     bm25_index = build_bm25_index(data_dir, cfg)
     rerank_model = build_rerank(cfg)
 
+    parent_store = None
+    if cfg.chunk_pipeline.enable_parent_child:
+        parent_store = ParentChunkStore(Path(cfg.chunk_pipeline.parent_store_dir))
+
     if auto_rebuild_bm25 and bm25_index.document_count == 0:
         try:
-            count = vector_port.count(cfg.collection_name)
+            count = vector_port.count(collection)
         except (RuntimeError, ConnectionError, OSError, ValueError):
             count = 0
         if count > 0:
@@ -59,7 +68,7 @@ def create_query_stack(
             )
             bm25_index.rebuild_from_chroma(
                 chroma_dir,
-                cfg.collection_name,
+                collection,
                 tenant_id=tenant_id,
             )
 
@@ -70,6 +79,8 @@ def create_query_stack(
         bm25_index=bm25_index,
         rerank_model=rerank_model,
         chroma_dir=chroma_dir,
+        parent_store=parent_store,
+        collection=collection,
     )
 
 
@@ -81,11 +92,12 @@ def rebuild_bm25_from_chroma(
     cfg: Optional[RagPipelineConfig] = None,
 ) -> Tuple[int, str]:
     cfg = cfg or load_rag_pipeline_config(config_dir=config_dir)
+    collection = effective_collection_name(cfg)
     chroma_dir = str(data_dir / "chroma_dev")
     bm25_index = build_bm25_index(data_dir, cfg)
     n = bm25_index.rebuild_from_chroma(
         chroma_dir,
-        cfg.collection_name,
+        collection,
         tenant_id=tenant_id,
     )
     return n, str(bm25_index._path)

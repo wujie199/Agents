@@ -30,12 +30,26 @@ def build_hot_memory(
     *,
     archive_db: Any = None,
     store_dir_override: Optional[str] = None,
+    database_url: Optional[str] = None,
 ) -> Any:
-    """L1 热记忆：file（默认）或 relational（与 L2 同库）。"""
+    """L1 热记忆：file（默认）、relational（与 L2 同库）或 langgraph Store。"""
     backend = str(cfg.get("l1_store_backend", "file")).lower()
     max_hot = int(cfg.get("hot_memory_max_chars", 2200))
     max_user = int(cfg.get("user_memory_max_chars", 1375))
     use_lock = bool(cfg.get("l1_use_file_lock", True))
+
+    if backend == "langgraph":
+        from agent_platform.memory.adapters.hot_memory_langgraph_store_adapter import (
+            HotMemoryLangGraphStoreAdapter,
+            build_langgraph_memory_store,
+        )
+
+        store = build_langgraph_memory_store(cfg, database_url=database_url)
+        return HotMemoryLangGraphStoreAdapter(
+            store,
+            hot_memory_max_chars=max_hot,
+            user_memory_max_chars=max_user,
+        )
 
     if backend == "relational" and archive_db is not None:
         from agent_platform.memory.adapters.hot_memory_relational_adapter import (

@@ -9,9 +9,6 @@ import time
 from core.composition.run_context import RunContext
 from core.ports.observability import Layer
 
-from app.agents.observability.graph_metrics import record_tool_call
-from app.agents.observability.instrument import span_ctx
-
 _MEMORY_TOOLS = frozenset(
     {
         "session_search",
@@ -78,6 +75,9 @@ async def invoke_tool(
     tool_name: str,
     args: Dict[str, Any],
 ) -> Any:
+    from app.agents.observability.graph_metrics import record_tool_call
+    from app.agents.observability.instrument import span_ctx
+
     span_attrs: Dict[str, Any] = {"tool_name": tool_name}
     async with span_ctx(ctx, "agent.invoke_tool", Layer.AGENT, span_attrs):
         t0 = time.perf_counter()
@@ -157,30 +157,51 @@ async def _invoke_tool_impl(
         if tool_name == "remember_user_fact":
             from core.ports.memory import MemoryDelta
 
+            from app.agents.memory.memory_graph_state import record_l1_write
+
             require_hitl = bool(args.get("require_hitl", True))
+            key = str(args["key"])
+            value = str(args["value"])
             await memory.update_prompt_memory(
                 ctx.request,
-                MemoryDelta(
-                    key=str(args["key"]),
-                    value=str(args["value"]),
-                    source="user",
-                ),
+                MemoryDelta(key=key, value=value, source="user"),
                 require_hitl=require_hitl,
             )
-            return {"ok": True, "key": args["key"], "pending": require_hitl}
+            record_l1_write(
+                ctx,
+                key=key,
+                value=value,
+                source="user",
+                require_hitl=require_hitl,
+            )
+            return {"ok": True, "key": key, "pending": require_hitl}
         if tool_name == "memory":
+            from app.agents.memory.memory_graph_state import record_memory_tool_result
+
             invoke = getattr(memory, "invoke_memory_tool", None)
             if invoke is None:
                 return {"success": False, "error": "L1 memory tool not available."}
             ops = args.get("operations")
-            return invoke(
+            action = str(args.get("action", ""))
+            target = str(args.get("target", "memory"))
+            content = args.get("content")
+            result = invoke(
                 ctx.request,
-                action=str(args.get("action", "")),
-                target=str(args.get("target", "memory")),
-                content=args.get("content"),
+                action=action,
+                target=target,
+                content=content,
                 old_text=args.get("old_text"),
                 operations=ops if isinstance(ops, list) else None,
             )
+            if isinstance(result, dict):
+                record_memory_tool_result(
+                    ctx,
+                    result,
+                    action=action,
+                    target=target,
+                    content=str(content) if content else None,
+                )
+            return result
 
     if tool_name.startswith("mcp."):
         parts = tool_name.split(".", 2)

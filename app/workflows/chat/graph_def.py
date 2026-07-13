@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-聊天 LangGraph：prepare（L1+RAG+Context）→ create_react_agent → persist（L2）。
+聊天 LangGraph：prepare → agent → compress（L0）→ persist（L2）。
 
 Path A: enable_memory_tools=false, tools=[]
 Path B: enable_memory_tools=true, L1/L2/L3/L4 记忆工具
+
+状态 schema 见 app.agents.memory.memory_graph_state.ChatGraphState。
 """
 
 from __future__ import annotations
 
 import time
 import os
-from typing import Annotated, Any, TypedDict
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage, add_messages
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage
 
 from core.composition.run_context import RunContext
 
@@ -26,6 +28,16 @@ from app.agents.orchestration.chat_config import (
 )
 from app.agents.orchestration.chat_nodes import build_turn_messages, persist_user_and_assistant
 from app.agents.memory.l0_context import maybe_compress_turn_context
+from app.agents.memory.memory_graph_state import (
+    ChatGraphState,
+    build_prepare_state_patch,
+    l0_compress_triggered,
+    merge_memory_summary_with_state,
+    rehydrate_working_memory_to_ctx,
+    store_graph_memory_snapshot,
+    sync_pending_deltas_from_hot,
+    update_graph_memory_snapshot,
+)
 from app.agents.prompts.text_sanitize import strip_model_reasoning
 from app.agents.roles.retrieval_router import should_use_direct_llm_for_intent
 from app.agents.roles.react_turn import (
@@ -46,17 +58,7 @@ from app.agents.middleware.policy import PolicyMiddleware
 from app.agents.middleware.privacy import PrivacyMiddleware
 from app.agents.middleware.error_classifier import ErrorClassifierMiddleware
 from app.agents.middleware.audit import AuditMiddleware
-
-
-class ChatGraphState(TypedDict):
-    user_input: str
-    messages: Annotated[list, add_messages]
-    assistant_text: str
-    evidence_count: int
-    rag_empty: bool
-    memory_snapshot_hash: str
-    evidences_summary: list
-    memory_summary: dict
+from app.agents.middleware.conversation_audit import ConversationAuditMiddleware
 
 
 async def _prepare_node(
@@ -67,6 +69,8 @@ async def _prepare_node(
     _node_t0 = time.perf_counter()
     enable_rag = bool(configurable.get("enable_rag", True))
     chat_cfg: ChatAgentConfig = configurable.get("chat_cfg") or load_chat_config()
+    rehydrate_working_memory_to_ctx(ctx, state)
+    sync_pending_deltas_from_hot(ctx)
     user_input = (state.get("user_input") or "").strip()
     if not user_input:
         for msg in reversed(state.get("messages") or []):
@@ -107,15 +111,76 @@ async def _prepare_node(
             "duration_ms": round(_node_ms, 2),
         },
     )
-    return {
-        "user_input": user_input,
-        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *lc_messages],
-        "evidence_count": ev_count,
-        "rag_empty": rag_empty,
-        "memory_snapshot_hash": mem_hash,
-        "evidences_summary": evidences_summary or [],
-        "memory_summary": memory_summary or {},
-    }
+    patch = build_prepare_state_patch(
+        user_input=user_input,
+        lc_messages=lc_messages,
+        ev_count=ev_count,
+        rag_empty=rag_empty,
+        mem_hash=mem_hash,
+        evidences_summary=evidences_summary or [],
+        memory_summary=memory_summary or {},
+        ctx=ctx,
+        chat_cfg=chat_cfg,
+    )
+    store_graph_memory_snapshot(
+        ctx,
+        {
+            "retrieval_intent": patch.get("retrieval_intent", ""),
+            "memory_path": patch.get("memory_path", ""),
+            "pending_remember": patch.get("pending_remember"),
+            "pending_memory_delta": patch.get("pending_memory_delta") or [],
+            "l0_applied": False,
+        },
+    )
+    patch["memory_summary"] = merge_memory_summary_with_state(
+        patch.get("memory_summary"), patch
+    )
+    agent_debug(
+        "GRAPH-PREPARE",
+        "graph_def._prepare_node:memory_path",
+        "Hermes 记忆路径",
+        {
+            "memory_path": patch.get("memory_path"),
+            "retrieval_intent": patch.get("retrieval_intent"),
+            "pending_remember": bool(patch.get("pending_remember")),
+        },
+    )
+    return patch
+
+
+async def _compress_node(
+    state: ChatGraphState, config: RunnableConfig
+) -> dict[str, Any]:
+    """L0：回合结束后评估 Zone 3 压缩（不写 L1）。"""
+    configurable = (config or {}).get("configurable") or {}
+    ctx: RunContext = configurable["run_ctx"]
+    chat_cfg: ChatAgentConfig = configurable.get("chat_cfg") or load_chat_config()
+    extra = getattr(ctx, "extra", None)
+    before_count = int((extra or {}).get("_l0_compress_count") or 0) if isinstance(extra, dict) else 0
+
+    dict_out = [
+        d for d in (_message_to_dict(m) for m in (state.get("messages") or [])) if d
+    ]
+    mem_hash = state.get("memory_snapshot_hash") or ""
+    await maybe_compress_turn_context(
+        ctx,
+        dict_out,
+        chat_cfg=chat_cfg,
+        memory_snapshot_hash=mem_hash,
+    )
+    triggered = l0_compress_triggered(ctx, before_count)
+    update_graph_memory_snapshot(ctx, l0_applied=triggered)
+    from app.agents.memory.memory_runtime_debug import perf_mark, trace_layer_trigger
+
+    trace_layer_trigger(
+        ctx,
+        "L0",
+        "compress_node",
+        triggered,
+        "threshold_hit" if triggered else "skipped",
+    )
+    perf_mark(ctx, "GRAPH.compress_node", 0.0, l0_applied=triggered)
+    return {"l0_applied": triggered}
 
 
 async def _persist_node(
@@ -197,6 +262,14 @@ def build_chat_langgraph_workflow(
             persist=obs_cfg.audit_persist,
             audit_log_dir=obs_cfg.audit_log_dir,
         ),
+        ConversationAuditMiddleware(
+            persist=obs_cfg.audit_persist,
+            audit_log_dir=obs_cfg.audit_log_dir,
+            audit_content=obs_cfg.audit_content,
+            audit_include_retrieval=obs_cfg.audit_include_retrieval,
+            audit_include_tools=obs_cfg.audit_include_tools,
+            audit_max_content_chars=obs_cfg.audit_max_content_chars,
+        ),
         TracingMiddleware(),
         TimingMiddleware(
             slow_threshold_ms=3000,
@@ -254,18 +327,6 @@ def build_chat_langgraph_workflow(
             direct_llm=use_direct,
             intent=intent,
         )
-
-        mem_hash = state.get("memory_snapshot_hash") or ""
-        dict_out = [
-            d for d in (_message_to_dict(m) for m in out_messages) if d
-        ]
-        await maybe_compress_turn_context(
-            _agent_ctx,
-            dict_out,
-            chat_cfg=cfg,
-            memory_snapshot_hash=mem_hash,
-        )
-
         return {
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -278,12 +339,15 @@ def build_chat_langgraph_workflow(
     # 用 middleware 包装关键节点
     _wrapped_prepare = _make_sync_compat_wrapped(middlewares, _prepare_node, "prepare")
     _wrapped_agent = _make_sync_compat_wrapped(middlewares, _agent_node, "agent")
+    _wrapped_compress = _make_sync_compat_wrapped(middlewares, _compress_node, "compress")
     _wrapped_persist = _make_sync_compat_wrapped(middlewares, _persist_node, "persist")
     graph.add_node("prepare", _wrapped_prepare)
     graph.add_node("agent", _wrapped_agent)
+    graph.add_node("compress", _wrapped_compress)
     graph.add_node("persist", _wrapped_persist)
     graph.add_edge(START, "prepare")
     graph.add_edge("prepare", "agent")
-    graph.add_edge("agent", "persist")
+    graph.add_edge("agent", "compress")
+    graph.add_edge("compress", "persist")
     graph.add_edge("persist", END)
     return graph

@@ -30,7 +30,7 @@ class LocalBgeReranker:
         require_mounted_volume(
             self._model_dir,
             purpose="RAG 本地 rerank（bge-reranker-base）",
-            env_hint="config/rag_pipeline.yml 的 rerank.model_path",
+            env_hint="config/rag.yml 的 rerank 段或 RAG_RERANK_MODEL_PATH",
         )
         if not (Path(self._model_dir) / "config.json").is_file():
             raise FileNotFoundError(

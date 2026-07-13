@@ -106,10 +106,11 @@ class IndexManifest:
         config_hash: str,
         chunk_count: int = 0,
         vectors_written: int = 0,
+        chunk_fingerprints: Optional[Dict[str, str]] = None,
     ) -> None:
         tenants = self._data.setdefault("tenants", {})
         bucket = tenants.setdefault(tenant_id, {})
-        bucket[file_md5] = {
+        entry: Dict[str, Any] = {
             "doc_id": doc_id,
             "source_path": source_path,
             "file_md5": file_md5,
@@ -119,6 +120,9 @@ class IndexManifest:
             "vectors_written": vectors_written,
             "indexed_at": datetime.now(timezone.utc).isoformat(),
         }
+        if chunk_fingerprints:
+            entry["chunk_fingerprints"] = dict(chunk_fingerprints)
+        bucket[file_md5] = entry
         self.save()
 
     def remove(self, tenant_id: str, file_md5: str) -> None:
@@ -127,3 +131,15 @@ class IndexManifest:
         if file_md5 in bucket:
             del bucket[file_md5]
             self.save()
+
+    def find_by_doc_id(
+        self,
+        tenant_id: str,
+        doc_id: str,
+    ) -> Optional[tuple[str, Dict[str, Any]]]:
+        """按 doc_id 反查 manifest 条目，返回 (file_md5, entry)。"""
+        bucket = self._data.get("tenants", {}).get(tenant_id, {})
+        for file_md5, entry in bucket.items():
+            if entry.get("doc_id") == doc_id:
+                return file_md5, dict(entry)
+        return None

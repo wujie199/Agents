@@ -48,6 +48,8 @@ def test_scenario_intent_routing(scenario):
         assert plan.run_rag, scenario["id"]
     if scenario.get("expect_scope") == "user":
         assert resolve_recall_scope(query, cfg) == "user"
+    if expected_strategy := scenario.get("expect_recall_strategy"):
+        assert plan.recall_strategy == expected_strategy, scenario["id"]
 
 
 @pytest.mark.parametrize("scenario", _load_scenarios(), ids=lambda s: s["id"])

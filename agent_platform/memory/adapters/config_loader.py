@@ -24,6 +24,7 @@ DEFAULT_MEMORY_CONFIG: dict[str, Any] = {
     "skills_drafts_dir": "skills/drafts",
     "external_profiles_dir": "data/external_profiles",
     "session_search_max_chars": 2000,
+    "session_search_default_hermes_mode": "discovery",
     "session_search_cache_ttl": 900,
     "session_search_negative_cache_ttl": 120,
     "retention_days": 90,

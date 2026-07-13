@@ -23,7 +23,7 @@ class TestConfigPortAdapter:
     def test_get_nested_value(self):
         adapter = ConfigPortAdapter()
         model_name = adapter.get("models.instances.dashscope_chat.model_name")
-        assert model_name == "qwen3.6-plus"
+        assert model_name == "qwen3.6-flash"
 
     def test_get_with_default(self):
         adapter = ConfigPortAdapter()
